@@ -1,6 +1,7 @@
 """
-ASHWIN Core Session Management (Phase 3 / Stage A through Stage H, Section 2, Section 5, Section 6, Section 10, Section 12).
-Manages Core execution lifecycle, session isolation, component binding, storage connector integration, and fail-closed state.
+ASHWIN Core Session Management (Phase 3 / Stage A through Stage I, Phase 4, Section 2, Section 5, Section 6, Section 8, Section 10, Section 12).
+Manages Core execution lifecycle, session isolation, component binding, storage connector integration,
+laptop connector integration, and fail-closed state.
 """
 
 import time
@@ -15,6 +16,7 @@ from ashwin.core.memory import EphemeralMemoryStore
 from ashwin.core.classifier import InputClassifier
 from ashwin.core.router import AIRouter
 from ashwin.core.storage import StorageConnector, StorageOfflineError, StoragePermissionError, MotoStorageAdapter
+from ashwin.core.laptop_connector import LaptopConnector, LaptopOfflineError, LaptopPermissionError
 from ashwin.core.models import DataClass, SourceDomain, SecurityViolation, ScannedClassifiedContext
 from ashwin.core.consent import ConsentCoordinator, ConsentMetadata, CloudConsentToken
 
@@ -27,7 +29,7 @@ class CoreSessionError(Exception):
 class CoreSession:
     """
     Core Session Coordinator maintaining component bindings, storage operations,
-    turn execution, and session lifecycle.
+    laptop endpoint operations, turn execution, and session lifecycle.
     """
 
     def __init__(
@@ -39,6 +41,7 @@ class CoreSession:
         classifier: Optional[InputClassifier] = None,
         router: Optional[AIRouter] = None,
         storage_connector: Optional[StorageConnector] = None,
+        laptop_connector: Optional[LaptopConnector] = None,
     ):
         self.session_id = str(uuid.uuid4())
         self.created_at = time.time()
@@ -51,6 +54,7 @@ class CoreSession:
         self.classifier = classifier or InputClassifier(scanner=self.scanner)
         self.router = router or AIRouter()
         self.storage_connector = storage_connector
+        self.laptop_connector = laptop_connector
 
         # Fail-closed health check at initialization
         self._verify_health()
@@ -75,6 +79,10 @@ class CoreSession:
     def set_storage_connector(self, connector: Optional[StorageConnector]):
         """Binds or updates the pluggable storage connector."""
         self.storage_connector = connector
+
+    def set_laptop_connector(self, connector: Optional[LaptopConnector]):
+        """Binds or updates the laptop connector."""
+        self.laptop_connector = connector
 
     def execute_turn(
         self,
@@ -335,10 +343,179 @@ class CoreSession:
 
         return router_result
 
+    def execute_laptop_turn(
+        self,
+        command_text: str,
+        tool_name: str,
+        tool_args: Optional[Dict[str, Any]] = None,
+        permission_prompt_callback: Optional[Callable[[str], bool]] = None,
+        consent_coordinator: Optional[ConsentCoordinator] = None,
+        direct_consent_token: Optional[CloudConsentToken] = None
+    ) -> Dict[str, Any]:
+        """
+        Executes a turn involving the Windows Laptop Endpoint (Phase 4):
+        1. Ingests User command as distinct PHONE context.
+        2. Enforces Section 6.3 Laptop Access Permission BEFORE any tool invocation.
+        3. Executes requested tool through LaptopConnector.
+        4. If tool returns ScannedClassifiedContext (read_document_text, system info):
+           - Validates ScannedClassifiedContext (PROTECTED, SourceDomain.LAPTOP).
+           - Inserts into EphemeralMemoryStore.
+           - Delivers via AIRouter (sole boundary) with optional CloudConsentToken.
+        5. If tool returns status/message (open_folder, view_document, open_allowed_app):
+           - Verifies zero document content leakage.
+           - Logs audit event and returns status.
+        6. Handles offline/unreachable laptop cleanly without breaking Core.
+        """
+        if not self.is_active:
+            raise SecurityViolation("CoreSession is inactive. Ingress rejected.")
+
+        tool_args = tool_args or {}
+
+        # Step 1: Ingest User Command as PHONE context
+        user_cmd_context = self.classifier.process_user_input(
+            raw_text=command_text,
+            source=SourceDomain.PHONE,
+            is_stt=False
+        )
+        self.memory_store.add_context(user_cmd_context)
+
+        if not self.laptop_connector:
+            return {
+                "status": "UNAVAILABLE",
+                "message": "Your Windows laptop endpoint is currently unavailable.",
+                "reason": "No laptop connector configured."
+            }
+
+        # Step 2: Access Permission Check BEFORE any endpoint query
+        if not self.laptop_connector.get_access_permission():
+            prompt_text = "Your Windows laptop requires permission. May I access it?"
+            granted = False
+            if permission_prompt_callback is not None:
+                granted = permission_prompt_callback(prompt_text)
+
+            if not granted:
+                if self.audit_logger:
+                    self.audit_logger.log(
+                        event_type="LAPTOP_ACCESS_PERMISSION_DENIED",
+                        status="DENIED",
+                        details={"tool": tool_name, "args": tool_args}
+                    )
+                return {
+                    "status": "DENIED",
+                    "message": "Laptop access permission was denied. No laptop data was retrieved.",
+                    "reason": "Access permission denied by user."
+                }
+
+            self.laptop_connector.set_access_permission(True)
+            if self.audit_logger:
+                self.audit_logger.log(
+                    event_type="LAPTOP_ACCESS_PERMISSION_GRANTED",
+                    status="GRANTED",
+                    details={"tool": tool_name, "args": tool_args}
+                )
+
+        # Step 3: Execute tool over connector
+        try:
+            if tool_name == "find_file":
+                results = self.laptop_connector.find_file(query=tool_args.get("query", ""))
+                return {"status": "SUCCESS", "results": results, "content_returned_to_model": False}
+
+            elif tool_name == "find_folder":
+                results = self.laptop_connector.find_folder(query=tool_args.get("query", ""))
+                return {"status": "SUCCESS", "results": results, "content_returned_to_model": False}
+
+            elif tool_name == "list_folder":
+                results = self.laptop_connector.list_folder(folder_id=tool_args.get("folder_id", ""))
+                return {"status": "SUCCESS", "results": results, "content_returned_to_model": False}
+
+            elif tool_name == "open_folder":
+                msg = self.laptop_connector.open_folder(folder_id=tool_args.get("folder_id", ""))
+                return {"status": "SUCCESS", "message": msg, "content_returned_to_model": False}
+
+            elif tool_name == "view_document":
+                msg = self.laptop_connector.view_document(file_id=tool_args.get("file_id", ""))
+                return {"status": "SUCCESS", "message": msg, "content_returned_to_model": False}
+
+            elif tool_name == "open_allowed_app":
+                msg = self.laptop_connector.open_allowed_app(
+                    app_id=tool_args.get("app_id", ""),
+                    user_confirmed=tool_args.get("user_confirmed", False)
+                )
+                return {"status": "SUCCESS", "message": msg, "content_returned_to_model": False}
+
+            elif tool_name == "read_document_text":
+                ctx = self.laptop_connector.read_document_text(file_id=tool_args.get("file_id", ""))
+
+            elif tool_name == "get_open_apps":
+                ctx = self.laptop_connector.get_open_apps()
+
+            elif tool_name == "get_processes":
+                ctx = self.laptop_connector.get_processes()
+
+            elif tool_name == "get_connected_devices":
+                ctx = self.laptop_connector.get_connected_devices()
+
+            else:
+                return {
+                    "status": "ERROR",
+                    "message": f"Unsupported laptop tool: {tool_name}"
+                }
+
+        except LaptopOfflineError as e:
+            if self.audit_logger:
+                self.audit_logger.log(
+                    event_type="LAPTOP_OFFLINE",
+                    status="OFFLINE",
+                    details={"message": str(e)}
+                )
+            return {"status": "OFFLINE", "message": str(e)}
+        except LaptopPermissionError as e:
+            return {"status": "DENIED", "message": str(e)}
+        except Exception as e:
+            return {"status": "OFFLINE", "message": "Your Windows laptop endpoint is currently unavailable."}
+
+        # Step 4: For tools returning ScannedClassifiedContext, deliver through Router
+        self.memory_store.add_context(ctx)
+
+        router_result = self.router.process_context(
+            context=ctx,
+            consent_token=direct_consent_token
+        )
+
+        if router_result.get("status") == "SUCCESS":
+            return router_result
+
+        # Step 5: Cloud consent resolution if local AI is unavailable
+        if router_result.get("user_prompt_required", False) and consent_coordinator is not None:
+            metadata = ConsentMetadata(
+                source_domain=ctx.source,
+                data_class=ctx.data_class,
+                target_provider=router_result.get("target_provider", "CloudAI"),
+                rationale=(
+                    f"Local AI is unavailable. Processing private laptop content with "
+                    f"Cloud AI requires your explicit consent."
+                )
+            )
+            consent_token = consent_coordinator.request_consent(metadata)
+            if consent_token is not None:
+                second_result = self.router.process_context(
+                    context=ctx,
+                    consent_token=consent_token
+                )
+                return second_result
+            else:
+                return {
+                    "status": "DENIED",
+                    "reason": "Cloud AI consent was denied by user. Private laptop data was not transmitted.",
+                    "message": "Cloud AI consent was denied by user. Private laptop data was not transmitted."
+                }
+
+        return router_result
+
     def reset_session(self):
         """
         Resets ephemeral session state while preserving persistent credentials in CredentialStore.
-        Revokes any active ephemeral storage access permission.
+        Revokes any active ephemeral storage and laptop access permissions.
         """
         old_id = self.session_id
         self.session_id = str(uuid.uuid4())
@@ -347,6 +524,8 @@ class CoreSession:
         self.memory_store.clear()
         if self.storage_connector:
             self.storage_connector.revoke_access_permission()
+        if self.laptop_connector:
+            self.laptop_connector.revoke_access_permission()
         self._verify_health()
 
         if self.audit_logger:
@@ -362,6 +541,8 @@ class CoreSession:
         self.memory_store.clear()
         if self.storage_connector:
             self.storage_connector.revoke_access_permission()
+        if self.laptop_connector:
+            self.laptop_connector.revoke_access_permission()
         if self.audit_logger:
             self.audit_logger.log(
                 event_type="SESSION_TERMINATED",
