@@ -12,6 +12,8 @@ from ashwin.core.endpoint_config import EndpointConfig
 from ashwin.core.secret_scanner import SecretScanner
 from ashwin.core.audit import AuditLogger
 from ashwin.core.memory import EphemeralMemoryStore
+from ashwin.core.classifier import InputClassifier
+from ashwin.core.router import AIRouter
 
 
 class CoreSessionError(Exception):
@@ -29,7 +31,9 @@ class CoreSession:
         credential_store: Optional[CredentialStore] = None,
         scanner: Optional[SecretScanner] = None,
         audit_logger: Optional[AuditLogger] = None,
-        memory_store: Optional[EphemeralMemoryStore] = None
+        memory_store: Optional[EphemeralMemoryStore] = None,
+        classifier: Optional[InputClassifier] = None,
+        router: Optional[AIRouter] = None,
     ):
         self.session_id = str(uuid.uuid4())
         self.created_at = time.time()
@@ -39,6 +43,8 @@ class CoreSession:
         self.scanner = scanner or SecretScanner()
         self.audit_logger = audit_logger or AuditLogger()
         self.memory_store = memory_store or EphemeralMemoryStore(scanner=self.scanner)
+        self.classifier = classifier or InputClassifier(scanner=self.scanner)
+        self.router = router or AIRouter()
 
         # Fail-closed health check at initialization
         self._verify_health()

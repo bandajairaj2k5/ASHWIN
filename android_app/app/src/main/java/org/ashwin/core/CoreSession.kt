@@ -13,8 +13,9 @@ class CoreSessionException(message: String) : Exception(message)
 class CoreSession(
     val credentialStore: CredentialStore,
     val scanner: SecretScanner = SecretScanner(),
-    val voiceSubsystem: VoiceSubsystem? = null,
-    val memoryStore: EphemeralMemoryStore = EphemeralMemoryStore(scanner)
+    val memoryStore: EphemeralMemoryStore = EphemeralMemoryStore(scanner),
+    val classifier: InputClassifier = InputClassifier(scanner),
+    val router: AIRouter = AIRouter()
 ) {
     companion object {
         private const val TAG = "ASHWIN_CORE_SESSION"

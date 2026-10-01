@@ -24,7 +24,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnImportStaged: Button
     private lateinit var pinEditText: EditText
     private val scanner = SecretScanner()
-    private val router = AIRouter()
+    private lateinit var coreSession: CoreSession
     private lateinit var voiceSubsystem: VoiceSubsystem
     private lateinit var credentialStore: CredentialStore
 
@@ -40,10 +40,11 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "MainActivity.onCreate starting")
         
         credentialStore = CredentialStore(this)
+        coreSession = CoreSession(credentialStore = credentialStore, scanner = scanner)
 
         // Initialize and verify core security components
         scanner.scanAndRedact("TEST_INPUT")
-        router.processContext(
+        coreSession.router.processContext(
             ScannedClassifiedContext(
                 content = "TEST_INPUT",
                 dataClass = DataClass.PUBLIC,
@@ -53,7 +54,11 @@ class MainActivity : AppCompatActivity() {
                 cloudApproved = false
             )
         )
-        voiceSubsystem = VoiceSubsystem(this)
+        voiceSubsystem = VoiceSubsystem(
+            session = coreSession,
+            sttEngine = OnDeviceSTTEngine(this),
+            ttsEngine = OnDeviceTTSEngine(this)
+        )
 
         // Build UI programmatically
         val layout = LinearLayout(this).apply {
@@ -127,7 +132,32 @@ class MainActivity : AppCompatActivity() {
             val pkgPath = intent.getStringExtra("package_path") ?: ""
             val pin = intent.getStringExtra("pin") ?: ""
             runDeveloperHarnessTest(pkgPath, pin)
+        } else if (action == "verify_voice_subsystem") {
+            runVoiceDiagnosticVerification()
         }
+    }
+
+    private fun runVoiceDiagnosticVerification() {
+        Thread {
+            val logTag = "ASHWIN_VOICE_DIAGNOSTICS"
+            Log.i(logTag, "=== VOICE SUBSYSTEM DIAGNOSTIC VERIFICATION START ===")
+            val isSttOnDevice = voiceSubsystem.sttEngine.isOnDeviceAvailable()
+            Log.i(logTag, "1. SpeechRecognizer.isOnDeviceRecognitionAvailable: $isSttOnDevice")
+
+            val isTtsLocal = voiceSubsystem.ttsEngine.isLocalTtsAvailable()
+            val selectedVoice = voiceSubsystem.ttsEngine.getSelectedVoiceName()
+            Log.i(logTag, "2. Local TTS Engine: initialized=$isTtsLocal, selectedVoice=$selectedVoice")
+
+            // Test pipeline flow
+            val testUtterance = "Voice diagnostics test message"
+            val classified = voiceSubsystem.classifier.processUserInput(testUtterance, isStt = true)
+            Log.i(logTag, "3. STT Classifier: dataClass=${classified.dataClass}, isStt=${classified.metadata["input_type"]}")
+
+            val routerRes = voiceSubsystem.router.processContext(classified)
+            Log.i(logTag, "4. AIRouter Result: status=${routerRes["status"]}, provider=${routerRes["provider_used"]}, isLocal=${routerRes["is_local"]}")
+
+            Log.i(logTag, "=== VOICE SUBSYSTEM DIAGNOSTIC VERIFICATION COMPLETE ===")
+        }.start()
     }
 
     private fun showPinPromptDialog(uri: Uri) {
