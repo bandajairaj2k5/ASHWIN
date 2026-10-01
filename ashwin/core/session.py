@@ -11,6 +11,7 @@ from ashwin.core.credentials import CredentialStore
 from ashwin.core.endpoint_config import EndpointConfig
 from ashwin.core.secret_scanner import SecretScanner
 from ashwin.core.audit import AuditLogger
+from ashwin.core.memory import EphemeralMemoryStore
 
 
 class CoreSessionError(Exception):
@@ -27,7 +28,8 @@ class CoreSession:
         self,
         credential_store: Optional[CredentialStore] = None,
         scanner: Optional[SecretScanner] = None,
-        audit_logger: Optional[AuditLogger] = None
+        audit_logger: Optional[AuditLogger] = None,
+        memory_store: Optional[EphemeralMemoryStore] = None
     ):
         self.session_id = str(uuid.uuid4())
         self.created_at = time.time()
@@ -36,6 +38,7 @@ class CoreSession:
         self.credential_store = credential_store or CredentialStore()
         self.scanner = scanner or SecretScanner()
         self.audit_logger = audit_logger or AuditLogger()
+        self.memory_store = memory_store or EphemeralMemoryStore(scanner=self.scanner)
 
         # Fail-closed health check at initialization
         self._verify_health()
@@ -65,6 +68,7 @@ class CoreSession:
         self.session_id = str(uuid.uuid4())
         self.created_at = time.time()
         self.is_active = True
+        self.memory_store.clear()
         self._verify_health()
 
         if self.audit_logger:
@@ -77,6 +81,7 @@ class CoreSession:
     def terminate_session(self):
         """Terminates active session and prevents further operations."""
         self.is_active = False
+        self.memory_store.clear()
         if self.audit_logger:
             self.audit_logger.log(
                 event_type="SESSION_TERMINATED",
