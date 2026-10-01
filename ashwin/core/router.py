@@ -3,7 +3,7 @@ ASHWIN AI Router (RULE-01, RULE-03, RULE-04, RULE-05, Section 4).
 Routes scanned & classified context objects to Local or Cloud AI models according to strict privacy boundaries.
 """
 
-from typing import Dict, Any, Optional, Protocol, List
+from typing import Dict, Any, Optional, Protocol
 from ashwin.core.models import (
     DataClass,
     SourceDomain,
@@ -40,17 +40,17 @@ class CloudAIProvider:
 class AIRouter:
     """
     Model-agnostic AI Router enforcing Section 4 rules, RULE-01, RULE-03, RULE-04, RULE-05.
+    Sole model-delivery boundary. Accepts ONLY typed ScannedClassifiedContext.
+    Cloud routing requires explicit per-request consent for non-public data.
     """
 
     def __init__(
         self,
         local_provider: Optional[AIProvider] = None,
-        cloud_provider: Optional[AIProvider] = None,
-        allow_cloud_default_protected: bool = False
+        cloud_provider: Optional[AIProvider] = None
     ):
         self.local_provider = local_provider or LocalAIProvider()
         self.cloud_provider = cloud_provider or CloudAIProvider()
-        self.allow_cloud_default_protected = allow_cloud_default_protected
         self.local_available = True
 
     def set_local_availability(self, available: bool):
@@ -83,6 +83,8 @@ class AIRouter:
                 "status": "DENIED",
                 "reason": "Missing cloud egress consent while local AI is unavailable or prohibited.",
                 "user_prompt_required": True,
+                "data_class": context.data_class.value,
+                "source": context.source.value,
                 "message": (
                     f"The local AI is unavailable. Processing this {context.data_class.value} data "
                     f"from {context.source.value} with cloud AI would send contents outside your device. "
@@ -111,7 +113,7 @@ class AIRouter:
         """
         data_class = context.data_class
 
-        # HIGHLY_PROTECTED is already blocked by post_init and process_context
+        # HIGHLY_PROTECTED is strictly blocked from model ingress
         if data_class == DataClass.HIGHLY_PROTECTED:
             return None
 
@@ -123,21 +125,18 @@ class AIRouter:
                 return self.local_provider
             return None
 
-        # PERSONAL data: Local preferred, cloud per policy/consent
+        # PERSONAL data: Local preferred, cloud requires explicit per-request consent
         if data_class == DataClass.PERSONAL:
             if self.local_available and self.local_provider:
                 return self.local_provider
-            # Cloud requires consent or configured policy
-            if user_cloud_consent or self.allow_cloud_default_protected:
+            if user_cloud_consent or context.cloud_approved:
                 return self.cloud_provider
             return None
 
-        # PROTECTED data (typed input, STT output, Moto, Laptop, private emails, etc.)
-        # Section 4.2 / Section 4.4 / RULE-01: Default to Local AI.
+        # PROTECTED data: Default Local AI, cloud requires explicit per-request consent
         if data_class == DataClass.PROTECTED:
             if self.local_available and self.local_provider:
                 return self.local_provider
-            # If local AI unavailable, cloud requires explicit consent per request
             if user_cloud_consent or context.cloud_approved:
                 return self.cloud_provider
             return None
