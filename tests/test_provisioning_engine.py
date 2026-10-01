@@ -115,7 +115,8 @@ class TestProvisioningPackageEngine(unittest.TestCase):
             ca_cert_pem=self.ca_pem,
             client_cert_pem=self.client_cert_pem,
             client_key_pem=self.client_key_pem,
-            ttl_seconds=300 # 5 min TTL
+            ttl_seconds=300, # 5 min TTL
+            created_at=now
         )
 
         # Attempt after 301 seconds

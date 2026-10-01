@@ -47,7 +47,8 @@ class ProvisioningPackageEngine:
         endpoint_port: int = 8443,
         endpoint_use_tls: bool = True,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
-        package_id: Optional[str] = None
+        package_id: Optional[str] = None,
+        created_at: Optional[int] = None
     ) -> bytes:
         """
         Creates an encrypted, authenticated ASHWIN-PROV-1.0 binary provisioning artifact.
@@ -59,7 +60,7 @@ class ProvisioningPackageEngine:
         cls.validate_credentials_in_memory(ca_cert_pem, client_cert_pem, client_key_pem)
 
         pkg_id = package_id or str(uuid.uuid4())
-        now = int(time.time())
+        now = created_at if created_at is not None else int(time.time())
         expires_at = now + ttl_seconds
 
         ca_fp = cls.compute_cert_fingerprint(ca_cert_pem)
