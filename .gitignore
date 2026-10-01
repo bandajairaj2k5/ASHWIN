@@ -1,0 +1,44 @@
+# =============================================================================
+# ASHWIN — Git Ignore Configuration (Security, Secrets, Build Artifacts)
+# =============================================================================
+
+# Byte-compiled / optimized Python files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Secrets, Private Keys, Keystores, and Credentials (RULE-02, RULE-12)
+*.key
+*.keystore
+*.jks
+*.p12
+*.pfx
+certs/*.key
+debug.keystore
+.env
+.env.*
+secrets/
+private/
+
+# Android & SDK Build artifacts / Downloaded toolchains
+build/
+android_app/app/build/
+android_app/.gradle/
+android_app/build/
+.gradle/
+*.apk
+*.aab
+*.dex
+*.class
+
+# Logs, runtime scratch files, and debug dumps
+*.log
+logcat_output.txt
+scratch/
+.system_generated/
+.idea/
+.vscode/
+*.swp
+*.bak
