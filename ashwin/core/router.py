@@ -23,6 +23,7 @@ from ashwin.core.providers import (
     ProviderCredentialError,
     ProviderUnavailableError,
 )
+from ashwin.core.consent import CloudConsentToken, ConsentMetadata
 
 
 class AIRouter:
@@ -47,10 +48,12 @@ class AIRouter:
     def process_context(
         self,
         context: ScannedClassifiedContext,
-        user_cloud_consent: bool = False
+        user_cloud_consent: bool = False,
+        consent_token: Optional[CloudConsentToken] = None
     ) -> Dict[str, Any]:
         """
         Main gate (RULE-04, RULE-05). Accepts only valid ScannedClassifiedContext.
+        Enforces structured, request-bound consent verification before permitting cloud delivery.
         """
         # Enforce RULE-04 & RULE-05 typing & gate check
         if not isinstance(context, ScannedClassifiedContext):
@@ -64,7 +67,7 @@ class AIRouter:
             raise SecurityViolation("RULE-03 Violation: HIGHLY_PROTECTED data cannot enter model context.")
 
         # Route determination
-        target_provider = self._determine_route(context, user_cloud_consent)
+        target_provider, effective_token = self._determine_route(context, user_cloud_consent, consent_token)
 
         if target_provider is None:
             return {
@@ -73,12 +76,17 @@ class AIRouter:
                 "user_prompt_required": True,
                 "data_class": context.data_class.value,
                 "source": context.source.value,
+                "target_provider": self.cloud_provider.name if self.cloud_provider else "CloudAI",
                 "message": (
                     f"The local AI is unavailable. Processing this {context.data_class.value} data "
                     f"from {context.source.value} with cloud AI would send contents outside your device. "
                     "Allow this for this request?"
                 )
             }
+
+        # Consume the ephemeral consent token upon authorized cloud delivery attempt
+        if effective_token is not None:
+            effective_token.consume()
 
         response_text = target_provider.generate_response(context.content)
 
@@ -94,39 +102,62 @@ class AIRouter:
     def _determine_route(
         self,
         context: ScannedClassifiedContext,
-        user_cloud_consent: bool
-    ) -> Optional[AIProvider]:
+        user_cloud_consent: bool,
+        consent_token: Optional[CloudConsentToken] = None
+    ) -> tuple[Optional[AIProvider], Optional[CloudConsentToken]]:
         """
         Section 4 Routing Policy.
+        Returns (target_provider, effective_token_to_consume).
         """
         data_class = context.data_class
 
         # HIGHLY_PROTECTED is strictly blocked from model ingress
         if data_class == DataClass.HIGHLY_PROTECTED:
-            return None
+            return None, None
 
         # PUBLIC data: Cloud AI permitted
         if data_class == DataClass.PUBLIC:
             if self.cloud_provider:
-                return self.cloud_provider
+                return self.cloud_provider, None
             if self.local_available and self.local_provider:
-                return self.local_provider
-            return None
+                return self.local_provider, None
+            return None, None
+
+        # Helper to validate consent token
+        def _check_cloud_consent() -> tuple[bool, Optional[CloudConsentToken]]:
+            if not self.cloud_provider:
+                return False, None
+            if consent_token is not None:
+                if not consent_token.is_valid_for(context, self.cloud_provider.name):
+                    raise SecurityViolation("RULE-01 Violation: Consent token is invalid, mismatched, or already consumed.")
+                return True, consent_token
+            if user_cloud_consent or context.cloud_approved:
+                # Ephemeral token bound to this exact context instance
+                ephemeral_token = CloudConsentToken(
+                    request_id="DIRECT_CALL",
+                    source_domain=context.source,
+                    data_class=context.data_class,
+                    target_provider=self.cloud_provider.name
+                )
+                return True, ephemeral_token
+            return False, None
 
         # PERSONAL data: Local preferred, cloud requires explicit per-request consent
         if data_class == DataClass.PERSONAL:
             if self.local_available and self.local_provider:
-                return self.local_provider
-            if user_cloud_consent or context.cloud_approved:
-                return self.cloud_provider
-            return None
+                return self.local_provider, None
+            has_consent, token = _check_cloud_consent()
+            if has_consent:
+                return self.cloud_provider, token
+            return None, None
 
         # PROTECTED data: Default Local AI, cloud requires explicit per-request consent
         if data_class == DataClass.PROTECTED:
             if self.local_available and self.local_provider:
-                return self.local_provider
-            if user_cloud_consent or context.cloud_approved:
-                return self.cloud_provider
-            return None
+                return self.local_provider, None
+            has_consent, token = _check_cloud_consent()
+            if has_consent:
+                return self.cloud_provider, token
+            return None, None
 
-        return None
+        return None, None

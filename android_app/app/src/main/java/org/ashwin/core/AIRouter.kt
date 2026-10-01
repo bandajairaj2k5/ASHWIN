@@ -6,8 +6,8 @@ package org.ashwin.core
  * Cloud routing requires explicit per-request consent for non-public data.
  */
 class AIRouter(
-    private val localProvider: AIProvider? = LocalAIProvider(),
-    private val cloudProvider: AIProvider? = CloudAIProvider(),
+    val localProvider: AIProvider? = LocalAIProvider(),
+    val cloudProvider: AIProvider? = CloudAIProvider(),
     private var localAvailable: Boolean = true
 ) {
 
@@ -15,9 +15,12 @@ class AIRouter(
         this.localAvailable = available
     }
 
+    fun isLocalAvailable(): Boolean = localAvailable
+
     fun processContext(
         context: ScannedClassifiedContext,
-        userCloudConsent: Boolean = false
+        userCloudConsent: Boolean = false,
+        consentToken: CloudConsentToken? = null
     ): Map<String, Any> {
         if (!context.scanned || context.scanSummary["healthy"] != true) {
             throw RouterGateException("RULE-04 Violation: Context item missing valid scan state.")
@@ -25,6 +28,28 @@ class AIRouter(
         if (context.dataClass == DataClass.HIGHLY_PROTECTED) {
             throw SecurityViolationException("RULE-03 Violation: HIGHLY_PROTECTED data cannot enter model context.")
         }
+
+        fun checkCloudConsent(): Pair<Boolean, CloudConsentToken?> {
+            if (cloudProvider == null) return Pair(false, null)
+            if (consentToken != null) {
+                if (!consentToken.isValidFor(context, cloudProvider.name)) {
+                    throw SecurityViolationException("RULE-01 Violation: Consent token is invalid, mismatched, or already consumed.")
+                }
+                return Pair(true, consentToken)
+            }
+            if (userCloudConsent || context.cloudApproved) {
+                val ephemeralToken = CloudConsentToken(
+                    requestId = "DIRECT_CALL",
+                    sourceDomain = context.source,
+                    dataClass = context.dataClass,
+                    targetProvider = cloudProvider.name
+                )
+                return Pair(true, ephemeralToken)
+            }
+            return Pair(false, null)
+        }
+
+        var tokenToConsume: CloudConsentToken? = null
 
         val targetProvider: AIProvider? = when (context.dataClass) {
             DataClass.PUBLIC -> {
@@ -35,19 +60,23 @@ class AIRouter(
             DataClass.PERSONAL -> {
                 if (localAvailable && localProvider != null) {
                     localProvider
-                } else if (userCloudConsent || context.cloudApproved) {
-                    cloudProvider
                 } else {
-                    null
+                    val (hasConsent, token) = checkCloudConsent()
+                    if (hasConsent) {
+                        tokenToConsume = token
+                        cloudProvider
+                    } else null
                 }
             }
             DataClass.PROTECTED -> {
                 if (localAvailable && localProvider != null) {
                     localProvider
-                } else if (userCloudConsent || context.cloudApproved) {
-                    cloudProvider
                 } else {
-                    null
+                    val (hasConsent, token) = checkCloudConsent()
+                    if (hasConsent) {
+                        tokenToConsume = token
+                        cloudProvider
+                    } else null
                 }
             }
             DataClass.HIGHLY_PROTECTED -> {
@@ -62,9 +91,13 @@ class AIRouter(
                 "user_prompt_required" to true,
                 "data_class" to context.dataClass.name,
                 "source" to context.source.name,
+                "target_provider" to (cloudProvider?.name ?: "CloudAI"),
                 "message" to "The local AI is unavailable. Processing this ${context.dataClass.name} data from ${context.source.name} with cloud AI would send contents outside your device. Allow this for this request?"
             )
         }
+
+        // Consume ephemeral token
+        tokenToConsume?.consume()
 
         val responseText = targetProvider.generateResponse(context.content)
 

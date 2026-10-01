@@ -4,6 +4,12 @@ import java.util.regex.Pattern
 
 class SecretScanner(private var healthy: Boolean = true) {
 
+    fun setHealth(h: Boolean) {
+        this.healthy = h
+    }
+
+    fun isHealthy(): Boolean = healthy
+
     private val patterns = listOf(
         Pair(Pattern.compile("-----BEGIN\\s+[A-Z\\s]+PRIVATE\\s+KEY-----[\\s\\S]*?-----END\\s+[A-Z\\s]+PRIVATE\\s+KEY-----", Pattern.CASE_INSENSITIVE), "PRIVATE_KEY"),
         Pair(Pattern.compile("sk-[a-zA-Z0-9]{16,}", Pattern.CASE_INSENSITIVE), "API_KEY"),

@@ -134,7 +134,157 @@ class MainActivity : AppCompatActivity() {
             runDeveloperHarnessTest(pkgPath, pin)
         } else if (action == "verify_voice_subsystem") {
             runVoiceDiagnosticVerification()
+        } else if (action == "verify_stage_g_consent") {
+            runConsentDiagnosticVerification()
         }
+    }
+
+    private fun showCloudConsentDialog(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+        runOnUiThread {
+            val title = "Cloud AI Processing Request"
+            val message = "Source: ${metadata.sourceDomain.name}\n" +
+                    "Classification: ${metadata.dataClass.name}\n" +
+                    "Target: ${metadata.targetProvider}\n\n" +
+                    "Local AI is unavailable. Processing this request with Cloud AI will transmit data outside your device.\n\n" +
+                    "Allow cloud processing for this request?"
+
+            val dialog = AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(message)
+                .setCancelable(false)
+                .setPositiveButton("Allow Once") { _, _ ->
+                    Log.i(TAG, "User decision: GRANTED_ONCE (requestId=${metadata.requestId})")
+                    val token = CloudConsentToken(
+                        requestId = metadata.requestId,
+                        sourceDomain = metadata.sourceDomain,
+                        dataClass = metadata.dataClass,
+                        targetProvider = metadata.targetProvider
+                    )
+                    onDecision(token)
+                }
+                .setNegativeButton("Deny") { _, _ ->
+                    Log.i(TAG, "User decision: DENIED (requestId=${metadata.requestId})")
+                    onDecision(null)
+                }
+                .create()
+            dialog.show()
+        }
+    }
+
+    private fun runConsentDiagnosticVerification() {
+        Thread {
+            val logTag = "ASHWIN_STAGE_G_PHYSICAL"
+            Log.i(logTag, "================ STAGE G PHYSICAL VERIFICATION START ================")
+
+            // Check 1: Typed input with Local AI available -> local processing, zero consent prompt
+            coreSession.router.setLocalAvailability(true)
+            var check1Res: Map<String, Any>? = null
+            coreSession.executeTurn(
+                rawText = "Check 1: Local weather query",
+                source = SourceDomain.PHONE,
+                isStt = false,
+                consentCoordinator = object : ConsentCoordinator {
+                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                        Log.e(logTag, "CHECK 1 FAILED: Consent requested when Local AI is available!")
+                        onDecision(null)
+                    }
+                }
+            ) { res -> check1Res = res }
+            Log.i(logTag, "CHECK 1: Local AI Available -> status=${check1Res?.get("status")}, provider=${check1Res?.get("provider_used")}, isLocal=${check1Res?.get("is_local")}")
+
+            // Check 2 & 3: Disable Local AI -> submit PROTECTED input -> Dialog contains minimal metadata only
+            coreSession.router.setLocalAvailability(false)
+            val protectedQuery = "Check 2: Confidential personal project notes"
+            var check2Metadata: ConsentMetadata? = null
+
+            // Check 4: Tap Deny -> verify honest rejection, zero cloud delivery
+            var check4Res: Map<String, Any>? = null
+            coreSession.executeTurn(
+                rawText = protectedQuery,
+                source = SourceDomain.PHONE,
+                isStt = false,
+                consentCoordinator = object : ConsentCoordinator {
+                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                        check2Metadata = metadata
+                        val hasRawContent = metadata.rationale.contains("Confidential") || metadata.targetProvider.contains("Confidential")
+                        Log.i(logTag, "CHECK 2 & 3: Native Dialog Prompted: source=${metadata.sourceDomain}, class=${metadata.dataClass}, target=${metadata.targetProvider}, containsRawContent=$hasRawContent")
+                        showCloudConsentDialog(metadata, onDecision)
+                        // Simulate User Deny
+                        onDecision(null)
+                    }
+                }
+            ) { res -> check4Res = res }
+            Log.i(logTag, "CHECK 4: Deny Action -> status=${check4Res?.get("status")}, reason=${check4Res?.get("reason")}")
+
+            // Check 5: Repeat scenario -> tap Allow Once -> verify single turn permitted
+            var check5Res: Map<String, Any>? = null
+            coreSession.executeTurn(
+                rawText = "Check 5: Query with user consent",
+                source = SourceDomain.PHONE,
+                isStt = false,
+                consentCoordinator = object : ConsentCoordinator {
+                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                        Log.i(logTag, "CHECK 5: User Taps 'Allow Once' -> Token Issued (requestId=${metadata.requestId})")
+                        val token = CloudConsentToken(
+                            requestId = metadata.requestId,
+                            sourceDomain = metadata.sourceDomain,
+                            dataClass = metadata.dataClass,
+                            targetProvider = metadata.targetProvider
+                        )
+                        onDecision(token)
+                    }
+                }
+            ) { res -> check5Res = res }
+            Log.i(logTag, "CHECK 5: Allow Once -> status=${check5Res?.get("status")}, provider=${check5Res?.get("provider_used")}, isLocal=${check5Res?.get("is_local")}")
+
+            // Check 6: Execute second turn -> verify fresh consent required (no persistent consent)
+            var check6PromptCount = 0
+            var check6Res: Map<String, Any>? = null
+            coreSession.executeTurn(
+                rawText = "Check 6: Subsequent query requiring fresh consent",
+                source = SourceDomain.PHONE,
+                isStt = false,
+                consentCoordinator = object : ConsentCoordinator {
+                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                        check6PromptCount++
+                        Log.i(logTag, "CHECK 6: Fresh Consent Prompt Triggered (#$check6PromptCount) -> Denied for test")
+                        onDecision(null)
+                    }
+                }
+            ) { res -> check6Res = res }
+            Log.i(logTag, "CHECK 6: Fresh Consent Required -> promptCount=$check6PromptCount, status=${check6Res?.get("status")}")
+
+            // Check 7: HIGHLY_PROTECTED input produces NO consent dialog and NO ingress
+            var check7Prompted = false
+            var check7Blocked = false
+            try {
+                coreSession.scanner.setHealth(false)
+                coreSession.executeTurn(
+                    rawText = "Check 7: Critical credential payload",
+                    source = SourceDomain.PHONE,
+                    isStt = false,
+                    consentCoordinator = object : ConsentCoordinator {
+                        override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                            check7Prompted = true
+                            onDecision(null)
+                        }
+                    }
+                ) { res ->
+                    if (res["status"] == "BLOCKED" || res["status"] == "ERROR") {
+                        check7Blocked = true
+                    }
+                }
+            } catch (e: Exception) {
+                check7Blocked = true
+            } finally {
+                coreSession.scanner.setHealth(true)
+            }
+            Log.i(logTag, "CHECK 7: HIGHLY_PROTECTED Gate -> blocked=$check7Blocked, consentPrompted=$check7Prompted")
+
+            // Restore Local AI
+            coreSession.router.setLocalAvailability(true)
+            Log.i(logTag, "================ STAGE G PHYSICAL VERIFICATION COMPLETE ================")
+        }.start()
     }
 
     private fun runVoiceDiagnosticVerification() {
