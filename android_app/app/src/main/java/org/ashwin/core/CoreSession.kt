@@ -6,19 +6,21 @@ import java.util.UUID
 class CoreSessionException(message: String) : Exception(message)
 
 /**
- * ASHWIN Core Session Coordinator (Phase 3 / Stage A & E, Section 2, Section 5, Section 12).
+ * ASHWIN Core Session Coordinator (Phase 3 / Stages A through H, Section 2, Section 5, Section 6, Section 10, Section 12).
  *
- * Coordinates execution lifecycle, component binding, and fail-closed state.
+ * Coordinates execution lifecycle, storage connector binding, turn execution, and fail-closed state.
  */
 class CoreSession(
     val credentialStore: CredentialStore,
     val scanner: SecretScanner = SecretScanner(),
     val memoryStore: EphemeralMemoryStore = EphemeralMemoryStore(scanner),
     val classifier: InputClassifier = InputClassifier(scanner),
-    val router: AIRouter = AIRouter()
+    val router: AIRouter = AIRouter(),
+    var motoStorageClient: MotoStorageClient? = null
 ) {
     companion object {
         private const val TAG = "ASHWIN_CORE_SESSION"
+        const val OFFLINE_STORAGE_MSG = "Your private storage server is currently unavailable."
     }
 
     var sessionId: String = UUID.randomUUID().toString()
@@ -129,12 +131,134 @@ class CoreSession(
         callback(routerResult)
     }
 
+    fun executeStorageTurn(
+        commandText: String,
+        operation: String,
+        targetPath: String = "",
+        permissionPromptCallback: ((String, (Boolean) -> Unit) -> Unit)? = null,
+        consentCoordinator: ConsentCoordinator? = null,
+        callback: (Map<String, Any>) -> Unit
+    ) {
+        if (!isActive) {
+            callback(mapOf("status" to "ERROR", "message" to "CoreSession is inactive. Ingress rejected."))
+            return
+        }
+
+        // Step 1: Ingest User Command as distinct PHONE context
+        val userCmdContext = classifier.processUserInput(
+            rawText = commandText,
+            source = SourceDomain.PHONE,
+            isStt = false
+        )
+        memoryStore.addContext(userCmdContext)
+
+        val client = motoStorageClient
+        if (client == null) {
+            callback(mapOf(
+                "status" to "OFFLINE",
+                "message" to OFFLINE_STORAGE_MSG,
+                "reason" to "No Moto storage client configured."
+            ))
+            return
+        }
+
+        // Step 2: Access Permission Check (Section 6.3) BEFORE any network/metadata query
+        fun proceedWithStorageQuery() {
+            val storageContext: ScannedClassifiedContext
+            try {
+                storageContext = when (operation) {
+                    "list" -> client.listFiles(subfolder = targetPath)
+                    "search" -> client.searchFiles(query = targetPath)
+                    "read" -> client.readFile(relPath = targetPath)
+                    else -> {
+                        callback(mapOf("status" to "ERROR", "message" to "Unsupported storage operation: $operation"))
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Storage query failed: ${e.message}")
+                val errStr = e.message ?: ""
+                if (errStr.contains("Permission Denied") || errStr.contains("access permission", ignoreCase = true)) {
+                    callback(mapOf("status" to "DENIED", "message" to errStr))
+                } else {
+                    callback(mapOf("status" to "OFFLINE", "message" to OFFLINE_STORAGE_MSG))
+                }
+                return
+            }
+
+            // Step 3: Insert verified ScannedClassifiedContext into Ephemeral Memory
+            memoryStore.addContext(storageContext)
+
+            // Step 4: Dispatch to AIRouter (sole boundary)
+            val routerResult = router.processContext(storageContext)
+            if (routerResult["status"] == "SUCCESS") {
+                callback(routerResult)
+                return
+            }
+
+            // Step 5: Interactive Cloud Consent resolution if local AI is unavailable
+            val promptRequired = routerResult["user_prompt_required"] as? Boolean ?: false
+            if (promptRequired && consentCoordinator != null) {
+                val metadata = ConsentMetadata(
+                    sourceDomain = storageContext.source,
+                    dataClass = storageContext.dataClass,
+                    targetProvider = routerResult["target_provider"] as? String ?: "CloudAI",
+                    rationale = "Local AI is unavailable. Processing private Moto storage data with Cloud AI requires your explicit consent."
+                )
+
+                consentCoordinator.requestConsent(metadata) { consentToken ->
+                    if (consentToken != null) {
+                        val secondResult = router.processContext(
+                            context = storageContext,
+                            consentToken = consentToken
+                        )
+                        callback(secondResult)
+                    } else {
+                        callback(mapOf(
+                            "status" to "DENIED",
+                            "reason" to "Cloud AI consent was denied by user. Private storage data was not transmitted.",
+                            "message" to "Cloud AI consent was denied by user. Private storage data was not transmitted."
+                        ))
+                    }
+                }
+                return
+            }
+
+            callback(routerResult)
+        }
+
+        if (!client.isAccessPermissionGranted()) {
+            val promptText = "Your private Moto storage requires permission. May I access it?"
+            if (permissionPromptCallback != null) {
+                permissionPromptCallback(promptText) { granted ->
+                    if (granted) {
+                        client.setAccessPermission(true)
+                        proceedWithStorageQuery()
+                    } else {
+                        callback(mapOf(
+                            "status" to "DENIED",
+                            "message" to "Moto storage access permission was denied. No storage data was retrieved."
+                        ))
+                    }
+                }
+            } else {
+                callback(mapOf(
+                    "status" to "DENIED",
+                    "message" to "Moto storage access permission prompt unavailable."
+                ))
+            }
+        } else {
+            proceedWithStorageQuery()
+        }
+    }
+
     fun resetSession() {
         val oldSessionId = sessionId
         sessionId = UUID.randomUUID().toString()
         createdAt = System.currentTimeMillis()
         isActive = true
         memoryStore.clear()
+        motoStorageClient?.setAccessPermission(false)
         verifyHealth()
         Log.i(TAG, "CoreSession reset: oldSessionId=$oldSessionId, newSessionId=$sessionId")
     }
@@ -142,6 +266,7 @@ class CoreSession(
     fun terminateSession() {
         isActive = false
         memoryStore.clear()
+        motoStorageClient?.setAccessPermission(false)
         Log.i(TAG, "CoreSession terminated: sessionId=$sessionId")
     }
 }

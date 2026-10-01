@@ -1,11 +1,11 @@
 """
-ASHWIN Core Session Management (Phase 3 / Stage A, Section 2, Section 5, Section 12).
-Manages Core execution lifecycle, session isolation, component binding, and fail-closed state.
+ASHWIN Core Session Management (Phase 3 / Stage A through Stage H, Section 2, Section 5, Section 6, Section 10, Section 12).
+Manages Core execution lifecycle, session isolation, component binding, storage connector integration, and fail-closed state.
 """
 
 import time
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 
 from ashwin.core.credentials import CredentialStore
 from ashwin.core.endpoint_config import EndpointConfig
@@ -14,9 +14,8 @@ from ashwin.core.audit import AuditLogger
 from ashwin.core.memory import EphemeralMemoryStore
 from ashwin.core.classifier import InputClassifier
 from ashwin.core.router import AIRouter
-
-
-from ashwin.core.models import DataClass, SourceDomain, SecurityViolation
+from ashwin.core.storage import StorageConnector, StorageOfflineError, StoragePermissionError, MotoStorageAdapter
+from ashwin.core.models import DataClass, SourceDomain, SecurityViolation, ScannedClassifiedContext
 from ashwin.core.consent import ConsentCoordinator, ConsentMetadata, CloudConsentToken
 
 
@@ -27,7 +26,8 @@ class CoreSessionError(Exception):
 
 class CoreSession:
     """
-    Core Session Coordinator maintaining component bindings, turn execution, and session lifecycle.
+    Core Session Coordinator maintaining component bindings, storage operations,
+    turn execution, and session lifecycle.
     """
 
     def __init__(
@@ -38,6 +38,7 @@ class CoreSession:
         memory_store: Optional[EphemeralMemoryStore] = None,
         classifier: Optional[InputClassifier] = None,
         router: Optional[AIRouter] = None,
+        storage_connector: Optional[StorageConnector] = None,
     ):
         self.session_id = str(uuid.uuid4())
         self.created_at = time.time()
@@ -49,6 +50,7 @@ class CoreSession:
         self.memory_store = memory_store or EphemeralMemoryStore(scanner=self.scanner)
         self.classifier = classifier or InputClassifier(scanner=self.scanner)
         self.router = router or AIRouter()
+        self.storage_connector = storage_connector
 
         # Fail-closed health check at initialization
         self._verify_health()
@@ -69,6 +71,10 @@ class CoreSession:
     def is_healthy(self) -> bool:
         """Returns True if the session is active and all bound security components are operational."""
         return self.is_active and self.scanner is not None and self.scanner.is_healthy()
+
+    def set_storage_connector(self, connector: Optional[StorageConnector]):
+        """Binds or updates the pluggable storage connector."""
+        self.storage_connector = connector
 
     def execute_turn(
         self,
@@ -189,15 +195,158 @@ class CoreSession:
 
         return router_result
 
+    def execute_storage_turn(
+        self,
+        command_text: str,
+        operation: str,
+        target_path: str = "",
+        permission_prompt_callback: Optional[Callable[[str], bool]] = None,
+        consent_coordinator: Optional[ConsentCoordinator] = None,
+        direct_consent_token: Optional[CloudConsentToken] = None
+    ) -> Dict[str, Any]:
+        """
+        Executes a conversational turn involving Moto Storage:
+        1. Classifies and records the User's command context (SourceDomain.PHONE).
+        2. Prompts Section 6.3 Access Permission BEFORE any storage query.
+        3. If denied, halts cleanly without network call.
+        4. If granted, executes storage query through StorageConnector.
+        5. Validates bounded, extracted, scanned, and classified storage context.
+        6. Inserts strictly ScannedClassifiedContext into EphemeralMemoryStore.
+        7. Delivers through AIRouter (sole model boundary) with CloudConsentToken if needed.
+        8. Handles offline/unreachable storage cleanly (Section 2.5).
+        """
+        if not self.is_active:
+            raise SecurityViolation("CoreSession is inactive. Ingress rejected.")
+
+        # Step 1: Ingest User Command as distinct PHONE context
+        user_cmd_context = self.classifier.process_user_input(
+            raw_text=command_text,
+            source=SourceDomain.PHONE,
+            is_stt=False
+        )
+        self.memory_store.add_context(user_cmd_context)
+
+        if not self.storage_connector:
+            return {
+                "status": "UNAVAILABLE",
+                "message": "Your private storage server is currently unavailable.",
+                "reason": "No storage connector configured."
+            }
+
+        # Step 2: Access Permission Check (Section 6.3) BEFORE any network/metadata query
+        if not self.storage_connector.get_access_permission():
+            prompt_text = "Your private Moto storage requires permission. May I access it?"
+            granted = False
+            if permission_prompt_callback is not None:
+                granted = permission_prompt_callback(prompt_text)
+            
+            if not granted:
+                if self.audit_logger:
+                    self.audit_logger.log(
+                        event_type="MOTO_ACCESS_PERMISSION_DENIED",
+                        status="DENIED",
+                        details={"operation": operation, "target": target_path}
+                    )
+                return {
+                    "status": "DENIED",
+                    "message": "Moto storage access permission was denied. No storage data was retrieved.",
+                    "reason": "Access permission denied by user."
+                }
+            
+            self.storage_connector.set_access_permission(True)
+            if self.audit_logger:
+                self.audit_logger.log(
+                    event_type="MOTO_ACCESS_PERMISSION_GRANTED",
+                    status="GRANTED",
+                    details={"operation": operation, "target": target_path}
+                )
+
+        # Step 3: Execute Storage Query over connector
+        try:
+            if operation == "list":
+                storage_context = self.storage_connector.list_files(subfolder=target_path)
+            elif operation == "search":
+                storage_context = self.storage_connector.search_files(query=target_path)
+            elif operation == "read":
+                storage_context = self.storage_connector.read_file(rel_path=target_path)
+            else:
+                return {
+                    "status": "ERROR",
+                    "message": f"Unsupported storage operation: {operation}"
+                }
+        except StorageOfflineError as e:
+            if self.audit_logger:
+                self.audit_logger.log(
+                    event_type="STORAGE_OFFLINE",
+                    status="OFFLINE",
+                    details={"message": str(e)}
+                )
+            return {
+                "status": "OFFLINE",
+                "message": str(e)
+            }
+        except StoragePermissionError as e:
+            return {
+                "status": "DENIED",
+                "message": str(e)
+            }
+        except Exception as e:
+            return {
+                "status": "OFFLINE",
+                "message": "Your private storage server is currently unavailable."
+            }
+
+        # Step 4: Memory insertion of verified ScannedClassifiedContext (RULE-04, RULE-05)
+        self.memory_store.add_context(storage_context)
+
+        # Step 5: Deliver storage context through AIRouter (sole boundary)
+        router_result = self.router.process_context(
+            context=storage_context,
+            consent_token=direct_consent_token
+        )
+
+        if router_result.get("status") == "SUCCESS":
+            return router_result
+
+        # Step 6: Interactive Cloud Consent resolution if local AI is unavailable
+        if router_result.get("user_prompt_required", False) and consent_coordinator is not None:
+            metadata = ConsentMetadata(
+                source_domain=storage_context.source,
+                data_class=storage_context.data_class,
+                target_provider=router_result.get("target_provider", "CloudAI"),
+                rationale=(
+                    f"Local AI is unavailable. Processing private Moto storage file/metadata with "
+                    f"Cloud AI requires your explicit consent."
+                )
+            )
+            consent_token = consent_coordinator.request_consent(metadata)
+            if consent_token is not None:
+                second_result = self.router.process_context(
+                    context=storage_context,
+                    consent_token=consent_token
+                )
+                return second_result
+            else:
+                return {
+                    "status": "DENIED",
+                    "reason": "Cloud AI consent was denied by user. Private storage data was not transmitted.",
+                    "message": "Cloud AI consent was denied by user. Private storage data was not transmitted."
+                }
+
+        return router_result
+
     def reset_session(self):
         """
         Resets ephemeral session state while preserving persistent credentials in CredentialStore.
+        Revokes any active ephemeral storage access permission.
         """
         old_id = self.session_id
         self.session_id = str(uuid.uuid4())
         self.created_at = time.time()
         self.is_active = True
         self.memory_store.clear()
+        if self.storage_connector:
+            self.storage_connector.revoke_access_permission()
         self._verify_health()
 
         if self.audit_logger:
@@ -211,6 +360,8 @@ class CoreSession:
         """Terminates active session and prevents further operations."""
         self.is_active = False
         self.memory_store.clear()
+        if self.storage_connector:
+            self.storage_connector.revoke_access_permission()
         if self.audit_logger:
             self.audit_logger.log(
                 event_type="SESSION_TERMINATED",
