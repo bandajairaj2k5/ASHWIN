@@ -142,6 +142,8 @@ class MainActivity : AppCompatActivity() {
             runConsentDiagnosticVerification()
         } else if (action == "verify_stage_h_moto") {
             runMotoStorageDiagnosticVerification()
+        } else if (action == "verify_stage_i_e2e") {
+            runStageIE2EVerification()
         }
     }
 
@@ -335,6 +337,212 @@ class MainActivity : AppCompatActivity() {
             coreSession.router.setLocalAvailability(true)
 
             Log.i(logTag, "================ STAGE H PHYSICAL VERIFICATION COMPLETE ================")
+        }.start()
+    }
+
+    private fun runStageIE2EVerification() {
+        Thread {
+            val logTag = "ASHWIN_STAGE_I_E2E_PHYSICAL"
+            Log.i(logTag, "================ MASTER STAGE I E2E PHYSICAL VERIFICATION START ================")
+
+            // E2E-1: Typed Input -> Local AI Pipeline
+            coreSession.router.setLocalAvailability(true)
+            var e2e1Res: Map<String, Any>? = null
+            coreSession.executeTurn(
+                rawText = "E2E-1: Plan tomorrow's security audit schedule",
+                source = SourceDomain.PHONE,
+                isStt = false
+            ) { res -> e2e1Res = res }
+            val e2e1Success = e2e1Res?.get("status") == "SUCCESS" && e2e1Res?.get("is_local") == true
+            Log.i(logTag, "E2E-1: Typed Input -> Local AI: success=$e2e1Success, provider=${e2e1Res?.get("provider_used")}, isLocal=${e2e1Res?.get("is_local")}")
+
+            // E2E-2: Voice Subsystem Pipeline Verification
+            val isSttAvailable = voiceSubsystem.sttEngine.isOnDeviceAvailable()
+            val isTtsAvailable = voiceSubsystem.ttsEngine.isLocalTtsAvailable()
+            val classifiedVoice = voiceSubsystem.classifier.processUserInput("E2E-2: Voice command", isStt = true)
+            val routerVoiceRes = voiceSubsystem.router.processContext(classifiedVoice)
+            val ttsSpoke = voiceSubsystem.ttsEngine.speak("Operation completed successfully.")
+            val e2e2Success = isSttAvailable && routerVoiceRes["status"] == "SUCCESS"
+            Log.i(logTag, "E2E-2: Voice Pipeline: success=$e2e2Success, sttOnDevice=$isSttAvailable, ttsLocal=$isTtsAvailable, ttsSpoke=$ttsSpoke, voiceDataClass=${classifiedVoice.dataClass}")
+
+            // E2E-3: Moto Access Permission Gate (Pre-Query Prompt & Denial)
+            val motoClient = coreSession.motoStorageClient
+            if (motoClient == null || !motoClient.isPaired()) {
+                Log.e(logTag, "FAIL: MotoStorageClient is null or not paired.")
+                return@Thread
+            }
+
+            motoClient.setAccessPermission(false)
+            var e2e3Prompted = false
+            var e2e3DenyRes: Map<String, Any>? = null
+            coreSession.executeStorageTurn(
+                commandText = "E2E-3: Read document from Moto",
+                operation = "read",
+                targetPath = "Documents/moto_test_artifact.txt",
+                permissionPromptCallback = { prompt, onDecision ->
+                    e2e3Prompted = prompt.contains("Your private Moto storage requires permission. May I access it?")
+                    showMotoAccessPermissionDialog(prompt, onDecision)
+                    onDecision(false) // Simulate User Deny
+                }
+            ) { res -> e2e3DenyRes = res }
+            val e2e3Success = e2e3Prompted && e2e3DenyRes?.get("status") == "DENIED"
+            Log.i(logTag, "E2E-3: Moto Access Permission Gate (Denial): success=$e2e3Success, prompted=$e2e3Prompted, status=${e2e3DenyRes?.get("status")}")
+
+            // E2E-4: Moto Storage Read -> Local AI Reasoning (Physical mTLS)
+            motoClient.setAccessPermission(false)
+            var e2e4Res: Map<String, Any>? = null
+            coreSession.executeStorageTurn(
+                commandText = "E2E-4: Read artifact with permission",
+                operation = "read",
+                targetPath = "Documents/moto_test_artifact.txt",
+                permissionPromptCallback = { _, onDecision -> onDecision(true) }
+            ) { res -> e2e4Res = res }
+            val e2e4Success = e2e4Res?.get("status") == "SUCCESS" && e2e4Res?.get("is_local") == true
+            Log.i(logTag, "E2E-4: Moto Storage Read + Local AI: success=$e2e4Success, status=${e2e4Res?.get("status")}, provider=${e2e4Res?.get("provider_used")}")
+
+            // E2E-5: Cloud AI Consent Escalation for Moto Context (Controlled Mock/Test Coordinator)
+            Thread.sleep(600)
+            coreSession.router.setLocalAvailability(false)
+            var e2e5ConsentPrompted = false
+            var e2e5Res: Map<String, Any>? = null
+            coreSession.executeStorageTurn(
+                commandText = "E2E-5: Query requiring cloud consent",
+                operation = "read",
+                targetPath = "Documents/moto_test_artifact.txt",
+                permissionPromptCallback = { _, onDecision -> onDecision(true) },
+                consentCoordinator = object : ConsentCoordinator {
+                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                        e2e5ConsentPrompted = true
+                        val hasRaw = metadata.rationale.contains("ASHWIN")
+                        Log.i(logTag, "E2E-5: Cloud Consent Dialog Prompted: source=${metadata.sourceDomain}, class=${metadata.dataClass}, hasRawContent=$hasRaw")
+                        showCloudConsentDialog(metadata, onDecision)
+                        val token = CloudConsentToken(
+                            requestId = metadata.requestId,
+                            sourceDomain = metadata.sourceDomain,
+                            dataClass = metadata.dataClass,
+                            targetProvider = metadata.targetProvider
+                        )
+                        onDecision(token)
+                    }
+                }
+            ) { res -> e2e5Res = res }
+            val e2e5Success = e2e5ConsentPrompted && e2e5Res?.get("status") == "SUCCESS" && e2e5Res?.get("provider_used") == "CloudAI"
+            Log.i(logTag, "E2E-5: Cloud Consent Turn: success=$e2e5Success, prompted=$e2e5ConsentPrompted, provider=${e2e5Res?.get("provider_used")}")
+
+            // E2E-6: Fresh Consent Enforcement (Second Cloud Turn)
+            Thread.sleep(600)
+            var e2e6PromptCount = 0
+            var e2e6Res: Map<String, Any>? = null
+            coreSession.executeStorageTurn(
+                commandText = "E2E-6: Subsequent query requiring fresh consent",
+                operation = "read",
+                targetPath = "Documents/moto_test_artifact.txt",
+                permissionPromptCallback = { _, onDecision -> onDecision(true) },
+                consentCoordinator = object : ConsentCoordinator {
+                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+                        e2e6PromptCount++
+                        onDecision(null) // Deny second turn
+                    }
+                }
+            ) { res -> e2e6Res = res }
+            val e2e6Success = e2e6PromptCount == 1 && e2e6Res?.get("status") == "DENIED"
+            Log.i(logTag, "E2E-6: Fresh Consent Required: success=$e2e6Success, promptCount=$e2e6PromptCount, status=${e2e6Res?.get("status")}")
+
+            // Restore Local AI
+            coreSession.router.setLocalAvailability(true)
+
+            // E2E-7a: HIGHLY_PROTECTED/credential input is blocked before memory/model ingress
+            var e2e7aBlocked = false
+            try {
+                ScannedClassifiedContext(
+                    content = "RESTRICTED_KEY_MATERIAL",
+                    dataClass = DataClass.HIGHLY_PROTECTED,
+                    source = SourceDomain.PHONE,
+                    scanned = true,
+                    scanSummary = mapOf("healthy" to true)
+                )
+            } catch (e: SecurityViolationException) {
+                e2e7aBlocked = true
+            } catch (e: Exception) {
+                e2e7aBlocked = true
+            }
+            Log.i(logTag, "E2E-7a: HIGHLY_PROTECTED Hard Block: success=$e2e7aBlocked, blocked=$e2e7aBlocked")
+
+            // E2E-7b: SecretScanner failure/unhealthy causes fail-closed before model ingress
+            var e2e7bBlocked = false
+            try {
+                coreSession.scanner.setHealth(false)
+                coreSession.executeTurn(rawText = "Standard query while scanner unhealthy", source = SourceDomain.PHONE) { res ->
+                    if (res["status"] == "BLOCKED" || res["status"] == "ERROR") e2e7bBlocked = true
+                }
+            } catch (e: Exception) {
+                e2e7bBlocked = true
+            } finally {
+                coreSession.scanner.setHealth(true)
+            }
+            Log.i(logTag, "E2E-7b: Scanner Unhealthy Fail-Closed: success=$e2e7bBlocked, blocked=$e2e7bBlocked")
+
+            // E2E-8: Secret Redaction (RULE-09) Boundary Assertion
+            val syntheticSecret = "AIzaSyDummyTestKeyForScannerVerification12345"
+            val textWithSecret = "Project configuration api_key=$syntheticSecret for private storage."
+            val (redactedText, scanSummary, _) = coreSession.scanner.scanAndRedact(textWithSecret)
+
+            // Mandatory assertion: secret absent from ScannedClassifiedContext delivered to AIRouter
+            val secretAbsentFromIngressContext = !redactedText.contains(syntheticSecret) && redactedText.contains("[REDACTED:API_KEY]")
+            val ingressContext = ScannedClassifiedContext(
+                content = redactedText,
+                dataClass = DataClass.PROTECTED,
+                source = SourceDomain.MOTO_STORAGE,
+                scanned = true,
+                scanSummary = scanSummary,
+                cloudApproved = false,
+                metadata = mapOf("name" to "config.txt", "scope_label" to "MOTO_STORAGE")
+            )
+            val routerModelRes = coreSession.router.processContext(ingressContext)
+            val modelOut = routerModelRes["response"] as? String ?: ""
+            val secretAbsentFromModelOutput = !modelOut.contains(syntheticSecret)
+            val e2e8Success = secretAbsentFromIngressContext && secretAbsentFromModelOutput
+            Log.i(logTag, "E2E-8: RULE-09 Secret Redaction Boundary: success=$e2e8Success, absentFromIngress=$secretAbsentFromIngressContext, absentFromOutput=$secretAbsentFromModelOutput")
+
+            // E2E-9: Moto Offline Handling & Storage Independence
+            val savedClient = coreSession.motoStorageClient
+            coreSession.motoStorageClient = null
+            var e2e9OfflineRes: Map<String, Any>? = null
+            coreSession.executeStorageTurn(
+                commandText = "E2E-9: Query offline Moto",
+                operation = "read",
+                targetPath = "Documents/moto_test_artifact.txt"
+            ) { res -> e2e9OfflineRes = res }
+            val offlineMsg = e2e9OfflineRes?.get("message") as? String ?: ""
+            val offlineMsgExact = offlineMsg == "Your private storage server is currently unavailable."
+
+            var e2e9CoreRes: Map<String, Any>? = null
+            coreSession.executeTurn(rawText = "Calculate 15 + 27", source = SourceDomain.PHONE) { res -> e2e9CoreRes = res }
+            val coreIndependentSuccess = e2e9CoreRes?.get("status") == "SUCCESS"
+            val e2e9Success = offlineMsgExact && coreIndependentSuccess
+            coreSession.motoStorageClient = savedClient
+            Log.i(logTag, "E2E-9: Moto Offline Independence: success=$e2e9Success, exactOfflineMsg=$offlineMsgExact ('$offlineMsg'), coreSuccess=$coreIndependentSuccess")
+
+            // E2E-10: Session Reset Lifecycle Isolation
+            motoClient.setAccessPermission(true)
+            val prevSessionId = coreSession.sessionId
+            coreSession.resetSession()
+            val newSessionId = coreSession.sessionId
+            val sessionResetOk = prevSessionId != newSessionId && !motoClient.isAccessPermissionGranted()
+            Log.i(logTag, "E2E-10: Session Reset Isolation: success=$sessionResetOk, prevId=$prevSessionId, newId=$newSessionId, permRevoked=${!motoClient.isAccessPermissionGranted()}")
+
+            // E2E-11: Explicit Router-Boundary Typing Assertion Across Sources (Typed, Voice, Moto Storage)
+            val typedCtx = coreSession.classifier.processUserInput("Typed prompt", source = SourceDomain.PHONE)
+            val voiceCtx = coreSession.classifier.processUserInput("Voice prompt", source = SourceDomain.PHONE, isStt = true)
+            motoClient.setAccessPermission(true)
+            val motoCtx = motoClient.readFile("Documents/moto_test_artifact.txt")
+            val typedPass = coreSession.router.processContext(typedCtx)["status"] == "SUCCESS"
+            val voicePass = coreSession.router.processContext(voiceCtx)["status"] == "SUCCESS"
+            val motoPass = coreSession.router.processContext(motoCtx)["status"] == "SUCCESS"
+            val e2e11Success = typedPass && voicePass && motoPass
+            Log.i(logTag, "E2E-11: Router Boundary Typing: success=$e2e11Success, typedPass=$typedPass, voicePass=$voicePass, motoPass=$motoPass")
+
+            Log.i(logTag, "================ MASTER STAGE I E2E PHYSICAL VERIFICATION COMPLETE ================")
         }.start()
     }
 
