@@ -1,32 +1,10 @@
 package org.ashwin.core
 
 /**
- * ASHWIN AI Provider Interface and AI Router (Phase 3 / Stage C, RULE-01, RULE-03, RULE-04, RULE-05, Section 4).
+ * ASHWIN AI Router (Phase 3 / Stage C & D, RULE-01, RULE-03, RULE-04, RULE-05, Section 4).
  * Sole model-delivery boundary. Accepts ONLY typed ScannedClassifiedContext.
  * Cloud routing requires explicit per-request consent for non-public data.
  */
-interface AIProvider {
-    val name: String
-    val isLocal: Boolean
-    fun generateResponse(prompt: String): String
-}
-
-class LocalAIProvider : AIProvider {
-    override val name: String = "LocalAI"
-    override val isLocal: Boolean = true
-    override fun generateResponse(prompt: String): String {
-        return "[LocalAI Response]: Processed prompt safely on device."
-    }
-}
-
-class CloudAIProvider : AIProvider {
-    override val name: String = "CloudAI"
-    override val isLocal: Boolean = false
-    override fun generateResponse(prompt: String): String {
-        return "[CloudAI Response]: Processed prompt via authorized cloud provider."
-    }
-}
-
 class AIRouter(
     private val localProvider: AIProvider? = LocalAIProvider(),
     private val cloudProvider: AIProvider? = CloudAIProvider(),

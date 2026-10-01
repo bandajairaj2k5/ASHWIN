@@ -13,28 +13,16 @@ from ashwin.core.models import (
 )
 
 
-class AIProvider(Protocol):
-    name: str
-    is_local: bool
-
-    def generate_response(self, prompt: str) -> str:
-        ...
-
-
-class LocalAIProvider:
-    name = "LocalAI"
-    is_local = True
-
-    def generate_response(self, prompt: str) -> str:
-        return f"[LocalAI Response]: Processed prompt: '{prompt[:50]}...'"
-
-
-class CloudAIProvider:
-    name = "CloudAI"
-    is_local = False
-
-    def generate_response(self, prompt: str) -> str:
-        return f"[CloudAI Response]: Processed prompt: '{prompt[:50]}...'"
+from ashwin.core.providers import (
+    AIProvider,
+    LocalAIProvider,
+    CloudAIProvider,
+    BaseCloudAIProvider,
+    GeminiCloudProvider,
+    ProviderError,
+    ProviderCredentialError,
+    ProviderUnavailableError,
+)
 
 
 class AIRouter:
