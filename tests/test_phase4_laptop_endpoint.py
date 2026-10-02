@@ -659,15 +659,10 @@ class TestPhase4LaptopEndpoint(unittest.TestCase):
             )
             impostor_client.configure_tls(server_cert_pem=server_crypto.cert_pem)
 
-            # Request from same-CN impostor must be rejected
-            try:
-                resp = impostor_client.request("GET", "/api/v1/health")
-                # Path A: Reached HTTP layer -> must be HTTP 403 Forbidden with pinning mismatch error
-                self.assertIn("error", resp)
-                self.assertIn("Forbidden", resp.get("error", ""))
-            except (ssl.SSLError, ConnectionResetError, OSError, Exception) as tls_err:
-                # Path B: TLS layer rejected impostor handshake -> confirm exception was raised
-                self.assertTrue(len(str(tls_err)) > 0)
+            # Request from same-CN impostor must be rejected (403 Forbidden / pinned cert mismatch)
+            resp = impostor_client.request("GET", "/api/v1/health")
+            self.assertIn("error", resp)
+            self.assertIn("Forbidden", resp.get("error", ""))
         finally:
             server.stop()
 
