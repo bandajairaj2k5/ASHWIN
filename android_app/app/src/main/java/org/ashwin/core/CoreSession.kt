@@ -16,11 +16,13 @@ class CoreSession(
     val memoryStore: EphemeralMemoryStore = EphemeralMemoryStore(scanner),
     val classifier: InputClassifier = InputClassifier(scanner),
     val router: AIRouter = AIRouter(),
-    var motoStorageClient: MotoStorageClient? = null
+    var motoStorageClient: MotoStorageClient? = null,
+    var laptopConnector: LaptopConnector? = null
 ) {
     companion object {
         private const val TAG = "ASHWIN_CORE_SESSION"
         const val OFFLINE_STORAGE_MSG = "Your private storage server is currently unavailable."
+        const val OFFLINE_LAPTOP_MSG = "Your Windows laptop endpoint is currently unavailable."
     }
 
     var sessionId: String = UUID.randomUUID().toString()
@@ -252,6 +254,118 @@ class CoreSession(
         }
     }
 
+    fun executeLaptopTurn(
+        commandText: String,
+        toolName: String,
+        toolArgs: Map<String, Any> = emptyMap(),
+        permissionPromptCallback: ((String, (Boolean) -> Unit) -> Unit)? = null,
+        consentCoordinator: ConsentCoordinator? = null,
+        callback: (Map<String, Any>) -> Unit
+    ) {
+        if (!isActive) {
+            callback(mapOf("status" to "ERROR", "message" to "CoreSession is inactive. Ingress rejected."))
+            return
+        }
+
+        // Step 1: Ingest User Command as distinct PHONE context
+        val userCmdContext = classifier.processUserInput(
+            rawText = commandText,
+            source = SourceDomain.PHONE,
+            isStt = false
+        )
+        memoryStore.addContext(userCmdContext)
+
+        val connector = laptopConnector
+        if (connector == null) {
+            callback(mapOf(
+                "status" to "OFFLINE",
+                "message" to OFFLINE_LAPTOP_MSG,
+                "reason" to "No LaptopConnector configured."
+            ))
+            return
+        }
+
+        fun proceedWithLaptopQuery() {
+            val laptopContext: ScannedClassifiedContext
+            try {
+                laptopContext = connector.executeTool(toolName, toolArgs)
+            } catch (e: Exception) {
+                Log.e(TAG, "Laptop tool query failed: ${e.message}")
+                val errStr = e.message ?: ""
+                if (errStr.contains("Permission Denied", ignoreCase = true) || errStr.contains("access permission", ignoreCase = true)) {
+                    callback(mapOf("status" to "DENIED", "message" to errStr))
+                } else {
+                    callback(mapOf("status" to "OFFLINE", "message" to OFFLINE_LAPTOP_MSG))
+                }
+                return
+            }
+
+            // Step 3: Insert verified ScannedClassifiedContext into Ephemeral Memory
+            memoryStore.addContext(laptopContext)
+
+            // Step 4: Dispatch to AIRouter (sole boundary)
+            val routerResult = router.processContext(laptopContext)
+            if (routerResult["status"] == "SUCCESS") {
+                callback(routerResult)
+                return
+            }
+
+            // Step 5: Interactive Cloud Consent resolution if local AI is unavailable
+            val promptRequired = routerResult["user_prompt_required"] as? Boolean ?: false
+            if (promptRequired && consentCoordinator != null) {
+                val metadata = ConsentMetadata(
+                    sourceDomain = laptopContext.source,
+                    dataClass = laptopContext.dataClass,
+                    targetProvider = routerResult["target_provider"] as? String ?: "CloudAI",
+                    rationale = "Local AI is unavailable. Processing private Windows laptop data with Cloud AI requires your explicit consent."
+                )
+
+                consentCoordinator.requestConsent(metadata) { consentToken ->
+                    if (consentToken != null) {
+                        val secondResult = router.processContext(
+                            context = laptopContext,
+                            consentToken = consentToken
+                        )
+                        callback(secondResult)
+                    } else {
+                        callback(mapOf(
+                            "status" to "DENIED",
+                            "reason" to "Cloud AI consent was denied by user. Private laptop data was not transmitted.",
+                            "message" to "Cloud AI consent was denied by user. Private laptop data was not transmitted."
+                        ))
+                    }
+                }
+                return
+            }
+
+            callback(routerResult)
+        }
+
+        if (!connector.isAccessPermissionGranted()) {
+            val promptText = "Your Windows laptop requires permission to run '$toolName'. May I proceed?"
+            if (permissionPromptCallback != null) {
+                permissionPromptCallback(promptText) { granted ->
+                    if (granted) {
+                        connector.setAccessPermission(true)
+                        proceedWithLaptopQuery()
+                    } else {
+                        callback(mapOf(
+                            "status" to "DENIED",
+                            "message" to "Windows laptop access permission was denied. No tool was executed."
+                        ))
+                    }
+                }
+            } else {
+                callback(mapOf(
+                    "status" to "DENIED",
+                    "message" to "Windows laptop access permission prompt unavailable."
+                ))
+            }
+        } else {
+            proceedWithLaptopQuery()
+        }
+    }
+
     fun resetSession() {
         val oldSessionId = sessionId
         sessionId = UUID.randomUUID().toString()
@@ -259,6 +373,7 @@ class CoreSession(
         isActive = true
         memoryStore.clear()
         motoStorageClient?.setAccessPermission(false)
+        laptopConnector?.setAccessPermission(false)
         verifyHealth()
         Log.i(TAG, "CoreSession reset: oldSessionId=$oldSessionId, newSessionId=$sessionId")
     }
@@ -267,6 +382,7 @@ class CoreSession(
         isActive = false
         memoryStore.clear()
         motoStorageClient?.setAccessPermission(false)
+        laptopConnector?.setAccessPermission(false)
         Log.i(TAG, "CoreSession terminated: sessionId=$sessionId")
     }
 }

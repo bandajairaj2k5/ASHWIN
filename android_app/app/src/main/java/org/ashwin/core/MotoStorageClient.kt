@@ -487,4 +487,56 @@ class MotoStorageClient(
             )
         )
     }
+
+    data class DownloadResult(
+        val success: Boolean,
+        val localFile: File?,
+        val bytesWritten: Long,
+        val sha256Hex: String,
+        val message: String
+    )
+
+    fun downloadFileToLocal(relPath: String, targetDir: File): DownloadResult {
+        if (!isPaired()) {
+            throw MotoSecurityException("Moto device is not paired.")
+        }
+        if (!accessPermissionGranted) {
+            throw MotoSecurityException("Access permission denied for Moto storage.")
+        }
+
+        val reqBody = JSONObject().put("file_path", relPath).toString().toByteArray(StandardCharsets.UTF_8)
+        val (statusCode, respBytes) = executeAuthenticatedRequest("POST", "/storage/v1/read", reqBody)
+
+        when (statusCode) {
+            413 -> return DownloadResult(false, null, 0, "", "Moto file exceeds 5 MB transfer limit.")
+            403 -> return DownloadResult(false, null, 0, "", "Access Forbidden: Path outside ASHWIN_STORAGE.")
+            404 -> return DownloadResult(false, null, 0, "", "File '$relPath' was not found on Moto storage.")
+            200 -> {}
+            else -> return DownloadResult(false, null, 0, "", "Download failed with status $statusCode: ${String(respBytes, StandardCharsets.UTF_8)}")
+        }
+
+        if (respBytes.size > MAX_BUFFER_SIZE) {
+            return DownloadResult(false, null, 0, "", "Downloaded file exceeds 5 MB limit.")
+        }
+
+        if (!targetDir.exists()) {
+            targetDir.mkdirs()
+        }
+
+        val fileName = File(relPath).name
+        val safeFileName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val destinationFile = File(targetDir, safeFileName)
+        destinationFile.writeBytes(respBytes)
+
+        val sha256Digest = MessageDigest.getInstance("SHA-256")
+        val hash = bytesToHex(sha256Digest.digest(respBytes))
+
+        return DownloadResult(
+            success = true,
+            localFile = destinationFile,
+            bytesWritten = respBytes.size.toLong(),
+            sha256Hex = hash,
+            message = "Downloaded '$fileName' successfully (${respBytes.size} bytes)."
+        )
+    }
 }

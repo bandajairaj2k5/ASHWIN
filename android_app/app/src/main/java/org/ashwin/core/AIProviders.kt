@@ -26,7 +26,7 @@ class LocalAIProvider(
     override val isLocal: Boolean = true
 
     override fun generateResponse(prompt: String): String {
-        return "[LocalAI Response ($modelIdentifier)]: Processed prompt safely on device: '${prompt.take(50)}...'"
+        return "Local AI model is not installed. Operating in deterministic on-device mode."
     }
 }
 

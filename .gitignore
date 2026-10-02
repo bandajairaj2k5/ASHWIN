@@ -40,7 +40,8 @@ android_app/build/
 logcat_output.txt
 scratch/
 .system_generated/
-.idea/
-.vscode/
 *.swp
 *.bak
+*.zip
+local.properties
+

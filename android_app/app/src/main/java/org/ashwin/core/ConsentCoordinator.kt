@@ -59,3 +59,12 @@ data class CloudConsentToken(
 interface ConsentCoordinator {
     fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit)
 }
+
+class CallbackConsentCoordinator(
+    private val handler: (ConsentMetadata, (CloudConsentToken?) -> Unit) -> Unit
+) : ConsentCoordinator {
+    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
+        handler(metadata, onDecision)
+    }
+}
+

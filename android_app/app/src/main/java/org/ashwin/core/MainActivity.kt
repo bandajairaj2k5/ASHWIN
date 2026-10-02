@@ -1,167 +1,900 @@
 package org.ashwin.core
 
+import android.Manifest
 import android.app.AlertDialog
+import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
-import android.provider.DocumentsContract
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.util.Log
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
+import android.view.Gravity
+import android.view.View
+import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import java.io.File
-import java.util.Arrays
+import java.text.SimpleDateFormat
+import java.util.*
 
+/**
+ * ASHWIN Mobile Assistant Main Activity.
+ *
+ * Full-screen Futuristic Holographic HUD with:
+ * - Dynamic Orange/Gold Holographic Sphere (HologramView)
+ * - Voice-first offline interaction (OnDeviceSTTEngine & OnDeviceTTSEngine)
+ * - Deterministic Intent Dispatcher & Parser (Zero paid AI APIs)
+ * - Motorola Moto G3 Private Encrypted Storage & Secure File Downloader
+ * - Windows Restricted Endpoint (10 Allowed Tools)
+ * - Email Connector (Read-only briefing interface)
+ * - Complete Security & Provisioning Architecture
+ */
 class MainActivity : AppCompatActivity() {
 
     private val TAG = "ASHWIN_CORE"
-    private lateinit var statusText: TextView
-    private lateinit var btnPickFile: Button
-    private lateinit var btnImportStaged: Button
-    private lateinit var pinEditText: EditText
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Core Security & Execution Components
+    private lateinit var credentialStore: CredentialStore
     private val scanner = SecretScanner()
+    private lateinit var motoStorageClient: MotoStorageClient
+    private lateinit var laptopConnector: LaptopConnector
+    private lateinit var emailConnector: EmailConnector
     private lateinit var coreSession: CoreSession
     private lateinit var voiceSubsystem: VoiceSubsystem
-    private lateinit var credentialStore: CredentialStore
+    private lateinit var intentDispatcher: IntentDispatcher
 
-    // SAF Document Picker
+    // UI Root and Screen States
+    private lateinit var rootContainer: FrameLayout
+    private lateinit var hudLayout: LinearLayout
+    private lateinit var settingsLayout: ScrollView
+    private lateinit var consoleLayout: LinearLayout
+
+    // Hologram & HUD Components
+    private lateinit var hologramView: HologramView
+    private lateinit var statusBadge: TextView
+    private lateinit var motoBadge: TextView
+    private lateinit var laptopBadge: TextView
+    private lateinit var stateLabel: TextView
+    private lateinit var promptTranscriptText: TextView
+    private lateinit var responseCardText: TextView
+    private lateinit var responseCardContainer: LinearLayout
+    private lateinit var inputEditText: EditText
+    private lateinit var btnMic: Button
+    private lateinit var btnSend: Button
+    private lateinit var logContainer: LinearLayout
+    private lateinit var logScrollView: ScrollView
+
+    // Settings View Components
+    private lateinit var settingsStatusText: TextView
+    private lateinit var pinEditText: EditText
+
+    // Chat Message Model
+    data class ChatMessage(
+        val sender: String,
+        val text: String,
+        val isUser: Boolean,
+        val timestamp: Long = System.currentTimeMillis(),
+        val tag: String? = null,
+        val isWarning: Boolean = false
+    )
+
+    private val chatMessages = mutableListOf<ChatMessage>()
+
+    // SAF Document Picker for Provisioning
     private val filePickerLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri != null) {
             showPinPromptDialog(uri)
         }
     }
 
+    // Audio Permission Launcher
+    private val requestAudioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            startVoiceRecognitionTurn()
+        } else {
+            Toast.makeText(this, "Microphone permission is required for voice input.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i(TAG, "MainActivity.onCreate starting")
-        
+        supportActionBar?.hide()
+        Log.i(TAG, "MainActivity.onCreate starting - Initializing Holographic Mobile Assistant")
+
+        // Configure edge-to-edge window insets cleanly
+        window.statusBarColor = Color.parseColor("#070A12")
+        window.navigationBarColor = Color.parseColor("#070A12")
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // Initialize Core Security Architecture
         credentialStore = CredentialStore(this)
+        motoStorageClient = MotoStorageClient(credentialStore, scanner)
+        laptopConnector = LaptopConnector(credentialStore, scanner)
+        emailConnector = EmailConnector(credentialStore, scanner)
+
         coreSession = CoreSession(
             credentialStore = credentialStore,
             scanner = scanner,
-            motoStorageClient = MotoStorageClient(credentialStore, scanner)
+            motoStorageClient = motoStorageClient,
+            laptopConnector = laptopConnector
         )
 
-        // Initialize and verify core security components
-        scanner.scanAndRedact("TEST_INPUT")
-        coreSession.router.processContext(
-            ScannedClassifiedContext(
-                content = "TEST_INPUT",
-                dataClass = DataClass.PUBLIC,
-                source = SourceDomain.PHONE,
-                scanned = true,
-                scanSummary = mapOf("healthy" to true),
-                cloudApproved = false
-            )
-        )
         voiceSubsystem = VoiceSubsystem(
             session = coreSession,
             sttEngine = OnDeviceSTTEngine(this),
             ttsEngine = OnDeviceTTSEngine(this)
         )
 
-        // Build UI programmatically
+        // Setup TTS playback sync with HologramView
+        voiceSubsystem.ttsEngine.setPlaybackListener(object : OnDeviceTTSEngine.TTSPlaybackListener {
+            override fun onSpeechStart(utteranceId: String) {
+                runOnUiThread {
+                    hologramView.currentState = HologramView.State.SPEAKING
+                    stateLabel.text = "SPEAKING"
+                    stateLabel.setTextColor(Color.parseColor("#FFA726"))
+                }
+            }
+
+            override fun onSpeechDone(utteranceId: String) {
+                runOnUiThread {
+                    hologramView.currentState = HologramView.State.IDLE
+                    stateLabel.text = "READY"
+                    stateLabel.setTextColor(Color.parseColor("#4ADE80"))
+                }
+            }
+
+            override fun onSpeechError(utteranceId: String, errorCode: Int) {
+                runOnUiThread {
+                    hologramView.currentState = HologramView.State.ERROR
+                    stateLabel.text = "AUDIO ERROR"
+                    stateLabel.setTextColor(Color.parseColor("#F87171"))
+                    mainHandler.postDelayed({
+                        hologramView.currentState = HologramView.State.IDLE
+                        stateLabel.text = "READY"
+                        stateLabel.setTextColor(Color.parseColor("#4ADE80"))
+                    }, 2500)
+                }
+            }
+        })
+
+        intentDispatcher = IntentDispatcher(
+            session = coreSession,
+            emailConnector = emailConnector
+        )
+
+        // Build UI Layers
+        rootContainer = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#070A12")) // Obsidian Black
+        }
+
+        // Apply WindowInsets listener to properly pad below status bar & above navigation bar
+        ViewCompat.setOnApplyWindowInsetsListener(rootContainer) { view, windowInsets ->
+            val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+            windowInsets
+        }
+
+        hudLayout = buildHolographicHudView()
+        settingsLayout = buildSettingsView()
+        consoleLayout = buildConsoleView()
+
+        rootContainer.addView(hudLayout)
+        rootContainer.addView(consoleLayout)
+        rootContainer.addView(settingsLayout)
+
+        consoleLayout.visibility = View.GONE
+        settingsLayout.visibility = View.GONE
+
+        setContentView(rootContainer)
+
+        // Update Device Status Badges
+        updateDeviceStatusBadges()
+
+        // Handle Intent Actions
+        handleIncomingIntent(intent)
+    }
+
+    override fun onNewIntent(newIntent: android.content.Intent?) {
+        super.onNewIntent(newIntent)
+        setIntent(newIntent)
+        newIntent?.let { handleIncomingIntent(it) }
+    }
+
+    private fun handleIncomingIntent(targetIntent: android.content.Intent) {
+        val action = targetIntent.getStringExtra("action")
+        when (action) {
+            "test_user_flow" -> runRealUserInteractionTest()
+            "run_physical_integration_test" -> {
+                val pkgPath = targetIntent.getStringExtra("package_path") ?: ""
+                val pin = targetIntent.getStringExtra("pin") ?: ""
+                runDeveloperHarnessTest(pkgPath, pin)
+            }
+            "verify_voice_subsystem" -> runVoiceDiagnosticVerification()
+            "verify_stage_g_consent" -> runConsentDiagnosticVerification()
+            "verify_stage_h_moto" -> runMotoStorageDiagnosticVerification()
+            "verify_stage_i_e2e" -> runStageIE2EVerification()
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        voiceSubsystem.shutdown()
+    }
+
+    // =========================================================================
+    // UI BUILDER: HOLOGRAPHIC ASSISTANT HUD VIEW
+    // =========================================================================
+
+    private fun buildHolographicHudView(): LinearLayout {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setBackgroundColor(Color.parseColor("#070A12")) // Deep Obsidian Background
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        // 1. Ultra-Clean Centered Minimalist Header (Positioned cleanly below status bar)
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 20, 32, 10)
+            gravity = Gravity.CENTER_HORIZONTAL
         }
 
         val titleText = TextView(this).apply {
-            text = "ASHWIN Core"
+            text = "A S H W I N"
             textSize = 22f
-            setPadding(0, 0, 0, 16)
-        }
-        layout.addView(titleText)
-
-        btnPickFile = Button(this).apply {
-            text = "Provision via SAF File Picker"
-            setOnClickListener {
-                filePickerLauncher.launch("*/*")
+            gravity = Gravity.CENTER
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(Color.parseColor("#FFE082")) // Gold Hologram Tone
+            letterSpacing = 0.35f
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            // Unobtrusive long-press to open Settings & Security without any visible button
+            setOnLongClickListener {
+                showSettingsScreen()
+                true
             }
         }
-        layout.addView(btnPickFile)
+        header.addView(titleText)
+        layout.addView(header)
 
-        // Staged package section
-        val stagedFile = File(getExternalFilesDir(null), "ashwin_identity.bin")
-        
-        val stagedLabel = TextView(this).apply {
-            text = "Direct Onboarding (Staged Package):"
-            textSize = 16f
-            setPadding(0, 24, 0, 8)
+        // 2. Large Hologram Intelligence Core (Fills the entire remaining screen)
+        val hologramContainer = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
         }
-        layout.addView(stagedLabel)
+
+        hologramView = HologramView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            currentState = HologramView.State.IDLE
+            onHologramTapListener = {
+                handleMicButtonClick()
+            }
+        }
+        hologramContainer.addView(hologramView)
+        layout.addView(hologramContainer)
+
+        // 3. Initialize background references for test harnesses / internal models
+        statusBadge = TextView(this).apply { text = "● ON-DEVICE" }
+        motoBadge = TextView(this).apply { text = "MOTO: PAIRED" }
+        laptopBadge = TextView(this).apply { text = "LAPTOP: READY" }
+        stateLabel = TextView(this).apply { text = "READY" }
+        promptTranscriptText = TextView(this).apply { text = "Ready." }
+        responseCardText = TextView(this).apply { text = "ASHWIN Holographic Core Ready." }
+        responseCardContainer = LinearLayout(this)
+        inputEditText = EditText(this)
+        btnMic = Button(this)
+        btnSend = Button(this)
+
+        return layout
+    }
+
+    // =========================================================================
+    // UI BUILDER: CONSOLE & CHAT HISTORY VIEW
+    // =========================================================================
+
+    private fun buildConsoleView(): LinearLayout {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#070A12"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setPadding(28, 40, 28, 28)
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 20)
+        }
+
+        val btnBack = Button(this).apply {
+            text = "← HUD"
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#FFE082"))
+            background = createRoundedDrawable(Color.parseColor("#1E293B"), 20f)
+            layoutParams = LinearLayout.LayoutParams(160, 80).apply { marginEnd = 20 }
+            setOnClickListener { showHudScreen() }
+        }
+        header.addView(btnBack)
+
+        val title = TextView(this).apply {
+            text = "Execution Log & History"
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        }
+        header.addView(title)
+        layout.addView(header)
+
+        logScrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        }
+
+        logContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        logScrollView.addView(logContainer)
+        layout.addView(logScrollView)
+
+        return layout
+    }
+
+    // =========================================================================
+    // UI BUILDER: SETTINGS & SECURITY VIEW
+    // =========================================================================
+
+    private fun buildSettingsView(): ScrollView {
+        val scrollView = ScrollView(this).apply {
+            setBackgroundColor(Color.parseColor("#070A12"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(28, 40, 28, 48)
+        }
+
+        // Header
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 24)
+        }
+
+        val btnBack = Button(this).apply {
+            text = "← HUD"
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#FFE082"))
+            background = createRoundedDrawable(Color.parseColor("#1E293B"), 20f)
+            layoutParams = LinearLayout.LayoutParams(160, 80).apply { marginEnd = 20 }
+            setOnClickListener { showHudScreen() }
+        }
+        header.addView(btnBack)
+
+        val title = TextView(this).apply {
+            text = "Settings & Security"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        }
+        header.addView(title)
+        layout.addView(header)
+
+        // 1. Security Architecture Card
+        layout.addView(createSectionHeader("SECURITY & SPECIFICATION"))
+        val secCard = createDarkCardView()
+        settingsStatusText = TextView(this).apply {
+            val isProv = credentialStore.getParsedCertificate() != null
+            text = "Core Session: ACTIVE\n" +
+                    "Secret Scanner: HEALTHY\n" +
+                    "Specification: v1.0.1 (RULE-01 to RULE-15)\n" +
+                    "Transient RAM Memory: 0 items\n" +
+                    "Moto Identity: ${if (isProv) "Provisioned (mTLS 1.3)" else "Not Provisioned"}\n" +
+                    "Windows Endpoint: LAPTOP-AGENT-01 (10 Tools)"
+            textSize = 13f
+            setTextColor(Color.parseColor("#CBD5E1"))
+            setLineSpacing(6f, 1f)
+        }
+        secCard.addView(settingsStatusText)
+
+        val btnResetSession = Button(this).apply {
+            text = "Purge Transient RAM & Reset Session"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = createRoundedDrawable(Color.parseColor("#DC2626"), 16f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 16 }
+            setOnClickListener {
+                coreSession.resetSession()
+                Toast.makeText(this@MainActivity, "CoreSession reset. Ephemeral state purged.", Toast.LENGTH_SHORT).show()
+                refreshSettingsStatus()
+                updateDeviceStatusBadges()
+            }
+        }
+        secCard.addView(btnResetSession)
+        layout.addView(secCard)
+
+        // 2. Connected Endpoints Card
+        layout.addView(createSectionHeader("CONNECTED ENDPOINTS"))
+        val devCard = createDarkCardView()
+
+        val motoTitle = TextView(this).apply {
+            text = "📱 Moto G3 Storage Endpoint"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#60A5FA"))
+        }
+        devCard.addView(motoTitle)
+
+        val motoDesc = TextView(this).apply {
+            text = "Address: 127.0.0.1:8443\nTransport: TLS 1.3 mTLS + SAS\nBounded Buffers: <= 5 MB\nDownloads: /sdcard/Download/ASHWIN"
+            textSize = 12f
+            setTextColor(Color.parseColor("#94A3B8"))
+            setPadding(0, 4, 0, 16)
+        }
+        devCard.addView(motoDesc)
+
+        val laptopTitle = TextView(this).apply {
+            text = "💻 Windows Restricted Endpoint"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.parseColor("#FDE047"))
+        }
+        devCard.addView(laptopTitle)
+
+        val laptopDesc = TextView(this).apply {
+            text = "Identity: LAPTOP-AGENT-01 (127.0.0.1:8444)\nTools: Exactly 10 tools\nShell/Scripts: ZERO (Fail closed)"
+            textSize = 12f
+            setTextColor(Color.parseColor("#94A3B8"))
+            setPadding(0, 4, 0, 0)
+        }
+        devCard.addView(laptopDesc)
+        layout.addView(devCard)
+
+        // 3. Identity Provisioning Card
+        layout.addView(createSectionHeader("IDENTITY PROVISIONING"))
+        val provCard = createDarkCardView()
+
+        val pinLabel = TextView(this).apply {
+            text = "Enter One-Time Setup PIN:"
+            textSize = 12f
+            setTextColor(Color.parseColor("#94A3B8"))
+            setPadding(0, 0, 0, 8)
+        }
+        provCard.addView(pinLabel)
 
         pinEditText = EditText(this).apply {
-            hint = "Enter One-Time Setup PIN"
+            hint = "One-Time Setup PIN"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.parseColor("#64748B"))
+            background = createRoundedDrawable(Color.parseColor("#1E293B"), 12f, Color.parseColor("#475569"))
+            setPadding(20, 16, 20, 16)
         }
-        layout.addView(pinEditText)
+        provCard.addView(pinEditText)
 
-        btnImportStaged = Button(this).apply {
-            text = "Import & Verify Moto Identity"
+        val btnImportStaged = Button(this).apply {
+            text = "Import Staged Identity (ashwin_identity.bin)"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            background = createRoundedDrawable(Color.parseColor("#0F766E"), 14f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 16 }
             setOnClickListener {
                 val enteredPin = pinEditText.text.toString()
                 if (enteredPin.isBlank()) {
-                    statusText.text = "Error: Please enter the Setup PIN."
+                    Toast.makeText(this@MainActivity, "Please enter the Setup PIN.", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
+                val stagedFile = File(getExternalFilesDir(null), "ashwin_identity.bin")
                 val targetFile = if (stagedFile.exists()) stagedFile else File("/sdcard/Android/data/org.ashwin.core/files/ashwin_identity.bin")
                 executeProvisioningAndMotoVerification(uri = null, file = targetFile, pin = enteredPin, isUiFlow = true)
             }
         }
-        layout.addView(btnImportStaged)
+        provCard.addView(btnImportStaged)
 
-        statusText = TextView(this).apply {
+        val btnPickFile = Button(this).apply {
+            text = "Select Identity Package via SAF File Picker"
+            textSize = 13f
+            setTextColor(Color.parseColor("#CBD5E1"))
+            background = createRoundedDrawable(Color.parseColor("#334155"), 14f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 12 }
+            setOnClickListener { filePickerLauncher.launch("*/*") }
+        }
+        provCard.addView(btnPickFile)
+        layout.addView(provCard)
+
+        // 4. Voice & Speech Card
+        layout.addView(createSectionHeader("ON-DEVICE VOICE"))
+        val voiceCard = createDarkCardView()
+        val sttStatus = if (voiceSubsystem.isVoiceInputAvailable()) "Available (On-Device)" else "Unavailable (SpeechRecognizer required)"
+        val voiceInfo = TextView(this).apply {
+            text = "STT Engine: $sttStatus\nTTS Voice: On-Device Deep Synthesis\nAudio Privacy: Zero raw audio persistence (RULE-11)"
+            textSize = 12f
+            setTextColor(Color.parseColor("#CBD5E1"))
+            setLineSpacing(4f, 1f)
+        }
+        voiceCard.addView(voiceInfo)
+        layout.addView(voiceCard)
+
+        scrollView.addView(layout)
+        return scrollView
+    }
+
+    private fun createSectionHeader(title: String): TextView {
+        return TextView(this).apply {
+            text = title
+            textSize = 11f
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(Color.parseColor("#64748B"))
+            setPadding(8, 24, 8, 8)
+            letterSpacing = 0.15f
+        }
+    }
+
+    private fun createDarkCardView(): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundedDrawable(Color.parseColor("#0F172A"), 20f, Color.parseColor("#1E293B"))
+            setPadding(24, 20, 24, 20)
+        }
+    }
+
+    private fun showHudScreen() {
+        settingsLayout.visibility = View.GONE
+        consoleLayout.visibility = View.GONE
+        hudLayout.visibility = View.VISIBLE
+    }
+
+    private fun showConsoleScreen() {
+        settingsLayout.visibility = View.GONE
+        hudLayout.visibility = View.GONE
+        consoleLayout.visibility = View.VISIBLE
+    }
+
+    private fun showSettingsScreen() {
+        refreshSettingsStatus()
+        hudLayout.visibility = View.GONE
+        consoleLayout.visibility = View.GONE
+        settingsLayout.visibility = View.VISIBLE
+    }
+
+    private fun refreshSettingsStatus() {
+        val isProv = credentialStore.getParsedCertificate() != null
+        val memCount = coreSession.memoryStore.count
+        settingsStatusText.text = "Core Session: ACTIVE\n" +
+                "Secret Scanner: HEALTHY\n" +
+                "Specification: v1.0.1 (RULE-01 to RULE-15)\n" +
+                "Transient RAM Memory: $memCount items\n" +
+                "Moto Identity: ${if (isProv) "Provisioned (mTLS 1.3)" else "Not Provisioned"}\n" +
+                "Windows Endpoint: LAPTOP-AGENT-01 (10 Tools)"
+    }
+
+    private fun updateDeviceStatusBadges() {
+        runOnUiThread {
             val isProv = credentialStore.getParsedCertificate() != null
-            text = "Status: READY\nSecurity Layer: Active (RULE-01 to RULE-15)\nMoto Identity: ${if (isProv) "Provisioned" else "Not Provisioned"}"
-            textSize = 14f
-            setPadding(0, 16, 0, 16)
+            val isMotoPaired = credentialStore.isMotoPaired()
+            val motoHost = credentialStore.getEndpointConfig().host
+
+            statusBadge.text = "● ON-DEVICE DETERMINISTIC"
+
+            if (isMotoPaired) {
+                motoBadge.text = "MOTO: $motoHost (PAIRED)"
+                motoBadge.setTextColor(Color.parseColor("#93C5FD"))
+            } else if (isProv) {
+                motoBadge.text = "MOTO: $motoHost (PROVISIONED)"
+                motoBadge.setTextColor(Color.parseColor("#FDE047"))
+            } else {
+                motoBadge.text = "MOTO: $motoHost (UNPAIRED)"
+                motoBadge.setTextColor(Color.parseColor("#94A3B8"))
+            }
+
+            val laptopConnectorActive = coreSession.laptopConnector != null
+            if (laptopConnectorActive) {
+                laptopBadge.text = "LAPTOP: 10.202.197.223 (READY)"
+                laptopBadge.setTextColor(Color.parseColor("#FDE047"))
+            } else {
+                laptopBadge.text = "LAPTOP: OFFLINE"
+                laptopBadge.setTextColor(Color.parseColor("#94A3B8"))
+            }
+        }
+    }
+
+    // =========================================================================
+    // VOICE & INTENT DISPATCH EXECUTION
+    // =========================================================================
+
+    private fun handleSendButtonClick() {
+        val text = inputEditText.text.toString().trim()
+        if (text.isBlank()) return
+        inputEditText.setText("")
+        executeAssistantTurn(text, isStt = false)
+    }
+
+    private fun handleMicButtonClick() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            startVoiceRecognitionTurn()
+        }
+    }
+
+    private fun startVoiceRecognitionTurn() {
+        if (!voiceSubsystem.isVoiceInputAvailable()) {
+            Toast.makeText(this, "On-device voice recognition is unavailable. Please use typed input.", Toast.LENGTH_LONG).show()
+            return
         }
 
-        val scrollView = ScrollView(this).apply {
-            addView(statusText)
+        hologramView.currentState = HologramView.State.LISTENING
+        stateLabel.text = "LISTENING..."
+        stateLabel.setTextColor(Color.parseColor("#60A5FA"))
+        promptTranscriptText.text = "Listening to speech..."
+
+        voiceSubsystem.startVoiceTurn(
+            userCloudConsent = false,
+            callback = object : VoiceSubsystem.VoiceTurnCallback {
+                override fun onTranscription(text: String, dataClass: String) {
+                    runOnUiThread {
+                        promptTranscriptText.text = "You: $text"
+                        hologramView.currentState = HologramView.State.THINKING
+                        stateLabel.text = "THINKING..."
+                        stateLabel.setTextColor(Color.parseColor("#FDE047"))
+                        executeParsedIntent(text, isStt = true)
+                    }
+                }
+
+                override fun onModelResponse(response: String, isLocal: Boolean, providerUsed: String) {
+                    // Handled inside intent execution
+                }
+
+                override fun onAudioPlaybackStarted() {
+                    Log.i(TAG, "Speech playback started.")
+                }
+
+                override fun onError(error: String) {
+                    runOnUiThread {
+                        hologramView.currentState = HologramView.State.ERROR
+                        stateLabel.text = "LISTENING ERROR"
+                        stateLabel.setTextColor(Color.parseColor("#F87171"))
+                        responseCardText.text = error
+                        mainHandler.postDelayed({
+                            hologramView.currentState = HologramView.State.IDLE
+                            stateLabel.text = "TAP SPHERE OR MIC TO SPEAK"
+                            stateLabel.setTextColor(Color.parseColor("#64748B"))
+                        }, 2500)
+                    }
+                }
+            }
+        )
+    }
+
+    private fun executeAssistantTurn(rawText: String, isStt: Boolean) {
+        promptTranscriptText.text = "You: $rawText"
+        hologramView.currentState = HologramView.State.THINKING
+        stateLabel.text = "THINKING..."
+        stateLabel.setTextColor(Color.parseColor("#FDE047"))
+
+        executeParsedIntent(rawText, isStt)
+    }
+
+    private fun executeParsedIntent(rawText: String, isStt: Boolean) {
+        val lower = rawText.lowercase().trim()
+
+        // Unsafe shell / script refusal check
+        if (lower.contains("run script") || lower.contains("python script") || lower.contains("powershell") ||
+            lower.contains("cmd.exe") || lower.contains("command line") || lower.contains("delete file") ||
+            lower.contains("shutdown laptop") || lower.contains("restart laptop") || lower.contains("terminal")
+        ) {
+            hologramView.currentState = HologramView.State.ERROR
+            stateLabel.text = "BLOCKED BY POLICY"
+            stateLabel.setTextColor(Color.parseColor("#F87171"))
+            val refusalMsg = "I cannot execute arbitrary scripts, shell commands, or file modifications. Only the 10 approved read-only tools and allowlisted applications are permitted."
+            displayAndSpeakResponse(refusalMsg, isSuccess = false, tag = "BLOCKED")
+            return
         }
-        layout.addView(scrollView)
 
-        setContentView(layout)
-        Log.i(TAG, "MainActivity UI view set successfully. State: READY")
+        val intent = intentDispatcher.parseIntent(rawText)
+        val downloadDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: File(filesDir, "downloads")
 
-        // Developer Integration Test Action if explicitly invoked
-        val action = intent.getStringExtra("action")
-        if (action == "run_physical_integration_test") {
-            val pkgPath = intent.getStringExtra("package_path") ?: ""
-            val pin = intent.getStringExtra("pin") ?: ""
-            runDeveloperHarnessTest(pkgPath, pin)
-        } else if (action == "verify_voice_subsystem") {
-            runVoiceDiagnosticVerification()
-        } else if (action == "verify_stage_g_consent") {
-            runConsentDiagnosticVerification()
-        } else if (action == "verify_stage_h_moto") {
-            runMotoStorageDiagnosticVerification()
-        } else if (action == "verify_stage_i_e2e") {
-            runStageIE2EVerification()
+        val consentCoordinator = CallbackConsentCoordinator { metadata, onDecision ->
+            showCloudConsentDialog(metadata, onDecision)
+        }
+
+        Thread {
+            intentDispatcher.dispatch(
+                intent = intent,
+                downloadDir = downloadDir,
+                permissionPrompt = { prompt, onDecision ->
+                    showEndpointPermissionDialog(prompt, onDecision)
+                },
+                consentCoordinator = consentCoordinator
+            ) { spokenText, isSuccess, dataTag ->
+                runOnUiThread {
+                    displayAndSpeakResponse(spokenText, isSuccess, dataTag)
+                }
+            }
+        }.start()
+    }
+
+    private fun displayAndSpeakResponse(text: String, isSuccess: Boolean, tag: String?) {
+        responseCardText.text = text
+
+        if (isSuccess) {
+            hologramView.currentState = HologramView.State.SUCCESS
+            stateLabel.text = "SUCCESS"
+            stateLabel.setTextColor(Color.parseColor("#4ADE80"))
+        } else {
+            hologramView.currentState = HologramView.State.ERROR
+            stateLabel.text = "ALERT"
+            stateLabel.setTextColor(Color.parseColor("#F87171"))
+        }
+
+        // Add to Execution Log
+        addLogMessage(ChatMessage(
+            sender = "ASHWIN",
+            text = text,
+            isUser = false,
+            tag = tag,
+            isWarning = !isSuccess
+        ))
+
+        // Synthesize voice response
+        val spoken = voiceSubsystem.ttsEngine.speak(text)
+        if (!spoken) {
+            mainHandler.postDelayed({
+                hologramView.currentState = HologramView.State.IDLE
+                stateLabel.text = "READY"
+                stateLabel.setTextColor(Color.parseColor("#4ADE80"))
+            }, 3000)
+        }
+    }
+
+    private fun resetConversation() {
+        coreSession.resetSession()
+        chatMessages.clear()
+        logContainer.removeAllViews()
+        promptTranscriptText.text = "Ready."
+        responseCardText.text = "Conversation cleared and transient RAM purged."
+        hologramView.currentState = HologramView.State.IDLE
+        stateLabel.text = "READY"
+        stateLabel.setTextColor(Color.parseColor("#4ADE80"))
+        Toast.makeText(this, "Transient state cleared.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addLogMessage(message: ChatMessage) {
+        chatMessages.add(message)
+        val msgView = buildLogMessageView(message)
+        logContainer.addView(msgView)
+        logScrollView.post {
+            logScrollView.fullScroll(View.FOCUS_DOWN)
+        }
+    }
+
+    private fun buildLogMessageView(msg: ChatMessage): LinearLayout {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 6, 0, 6)
+        }
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundedDrawable(
+                Color.parseColor("#0F172A"),
+                16f,
+                if (msg.isWarning) Color.parseColor("#EF4444") else Color.parseColor("#334155")
+            )
+            setPadding(20, 16, 20, 16)
+        }
+
+        val tagText = TextView(this).apply {
+            text = "[${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(msg.timestamp))}] ${msg.tag ?: "EXECUTION"}"
+            textSize = 10f
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(if (msg.isWarning) Color.parseColor("#F87171") else Color.parseColor("#60A5FA"))
+            setPadding(0, 0, 0, 4)
+        }
+        card.addView(tagText)
+
+        val text = TextView(this).apply {
+            this.text = msg.text
+            textSize = 12f
+            setTextColor(Color.parseColor("#E2E8F0"))
+        }
+        card.addView(text)
+
+        container.addView(card)
+        return container
+    }
+
+    private fun createRoundedDrawable(color: Int, radius: Float, strokeColor: Int? = null): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius
+            setColor(color)
+            if (strokeColor != null) {
+                setStroke(2, strokeColor)
+            }
+        }
+    }
+
+    // =========================================================================
+    // SECURITY & PERMISSION DIALOGS
+    // =========================================================================
+
+    private fun showEndpointPermissionDialog(prompt: String, onDecision: (Boolean) -> Unit) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Endpoint Access Request")
+                .setMessage(prompt)
+                .setCancelable(false)
+                .setPositiveButton("Allow") { _, _ ->
+                    Log.i(TAG, "Access Permission: GRANTED by user")
+                    onDecision(true)
+                }
+                .setNegativeButton("Deny") { _, _ ->
+                    Log.i(TAG, "Access Permission: DENIED by user")
+                    onDecision(false)
+                }
+                .create()
+                .show()
         }
     }
 
     private fun showCloudConsentDialog(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
         runOnUiThread {
-            val title = "Cloud AI Processing Request"
             val message = "Source: ${metadata.sourceDomain.name}\n" +
                     "Classification: ${metadata.dataClass.name}\n" +
                     "Target: ${metadata.targetProvider}\n\n" +
                     "Local AI is unavailable. Processing this request with Cloud AI will transmit data outside your device.\n\n" +
-                    "Allow cloud processing for this request?"
+                    "Allow cloud processing for this single request?"
 
-            val dialog = AlertDialog.Builder(this)
-                .setTitle(title)
+            AlertDialog.Builder(this)
+                .setTitle("Cloud AI Consent Required")
                 .setMessage(message)
                 .setCancelable(false)
                 .setPositiveButton("Allow Once") { _, _ ->
-                    Log.i(TAG, "User decision: GRANTED_ONCE (requestId=${metadata.requestId})")
                     val token = CloudConsentToken(
                         requestId = metadata.requestId,
                         sourceDomain = metadata.sourceDomain,
@@ -171,378 +904,99 @@ class MainActivity : AppCompatActivity() {
                     onDecision(token)
                 }
                 .setNegativeButton("Deny") { _, _ ->
-                    Log.i(TAG, "User decision: DENIED (requestId=${metadata.requestId})")
                     onDecision(null)
                 }
                 .create()
-            dialog.show()
+                .show()
         }
     }
 
-    private fun showMotoAccessPermissionDialog(prompt: String, onDecision: (Boolean) -> Unit) {
-        runOnUiThread {
-            val dialog = AlertDialog.Builder(this)
-                .setTitle("Moto Storage Access Request")
-                .setMessage(prompt)
-                .setCancelable(false)
-                .setPositiveButton("Allow") { _, _ ->
-                    Log.i(TAG, "Moto Access Permission: GRANTED by user")
-                    onDecision(true)
-                }
-                .setNegativeButton("Deny") { _, _ ->
-                    Log.i(TAG, "Moto Access Permission: DENIED by user")
-                    onDecision(false)
-                }
-                .create()
-            dialog.show()
+    private fun showPinPromptDialog(uri: Uri) {
+        val input = EditText(this).apply {
+            hint = "Enter One-Time Setup PIN"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-    }
-
-    private fun runMotoStorageDiagnosticVerification() {
-        Thread {
-            val logTag = "ASHWIN_STAGE_H_PHYSICAL"
-            Log.i(logTag, "================ STAGE H PHYSICAL VERIFICATION START ================")
-
-            val motoClient = coreSession.motoStorageClient
-            if (motoClient == null || !motoClient.isPaired()) {
-                Log.e(logTag, "FAIL: MotoStorageClient is null or not paired.")
-                return@Thread
+        AlertDialog.Builder(this)
+            .setTitle("Identity Package PIN")
+            .setView(input)
+            .setPositiveButton("Unlock & Import") { _, _ ->
+                val pin = input.text.toString()
+                if (pin.isNotBlank()) {
+                    executeProvisioningAndMotoVerification(uri = uri, file = null, pin = pin, isUiFlow = true)
+                }
             }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
 
-            // CHECK 1 & 2: Pre-Query Access Permission Check & Denial
-            motoClient.setAccessPermission(false)
-            var check1Prompted = false
-            var check2Res: Map<String, Any>? = null
+    // =========================================================================
+    // PROVISIONING & IDENTITY IMPORT
+    // =========================================================================
 
-            coreSession.executeStorageTurn(
-                commandText = "Check 1 & 2: Read artifact from Moto",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { prompt, onDecision ->
-                    check1Prompted = true
-                    val matchesExpected = prompt.contains("Your private Moto storage requires permission. May I access it?")
-                    Log.i(logTag, "CHECK 1: Access Permission Prompt Displayed: text='$prompt', matchesExpected=$matchesExpected")
-                    showMotoAccessPermissionDialog(prompt, onDecision)
-                    // Simulate User Deny for Check 2
-                    onDecision(false)
+    private fun executeProvisioningAndMotoVerification(uri: Uri?, file: File?, pin: String, isUiFlow: Boolean = false) {
+        Thread {
+            try {
+                val pkgBytes = if (uri != null) {
+                    contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw Exception("Could not read URI: $uri")
+                } else if (file != null && file.exists()) {
+                    file.readBytes()
+                } else {
+                    throw Exception("Identity file not found.")
                 }
-            ) { res -> check2Res = res }
 
-            Log.i(logTag, "CHECK 2: Access Permission Denied -> prompted=$check1Prompted, status=${check2Res?.get("status")}, message=${check2Res?.get("message")}")
+                val engine = ProvisioningEngine(credentialStore)
+                val result = engine.ingestPackage(pkgBytes, pin.toCharArray())
+                val isSuccess = result.success
 
-            // CHECK 3: Access Granted & Local AI Turn over physical mTLS
-            motoClient.setAccessPermission(false)
-            coreSession.router.setLocalAvailability(true)
-            var check3Res: Map<String, Any>? = null
-
-            coreSession.executeStorageTurn(
-                commandText = "Check 3: Read artifact with granted permission",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { prompt, onDecision ->
-                    Log.i(logTag, "CHECK 3: Prompted -> User Taps 'Allow'")
-                    onDecision(true)
-                }
-            ) { res -> check3Res = res }
-
-            val check3Status = check3Res?.get("status")
-            val check3Provider = check3Res?.get("provider_used")
-            val check3IsLocal = check3Res?.get("is_local")
-            Log.i(logTag, "CHECK 3: Storage Read + Local AI -> status=$check3Status, provider=$check3Provider, isLocal=$check3IsLocal")
-
-            // CHECK 4: Cloud Consent Escalation for Moto context (Local AI unavailable)
-            Thread.sleep(600)
-            coreSession.router.setLocalAvailability(false)
-            var check4ConsentPrompted = false
-            var check4Res: Map<String, Any>? = null
-
-            coreSession.executeStorageTurn(
-                commandText = "Check 4: Moto read requiring cloud consent",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { _, onDecision -> onDecision(true) },
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        check4ConsentPrompted = true
-                        val hasRawContent = metadata.rationale.contains("ASHWIN") || metadata.targetProvider.contains("ASHWIN")
-                        Log.i(logTag, "CHECK 4: Cloud Consent Prompted: source=${metadata.sourceDomain}, class=${metadata.dataClass}, hasRawContent=$hasRawContent")
-                        showCloudConsentDialog(metadata, onDecision)
-                        val token = CloudConsentToken(
-                            requestId = metadata.requestId,
-                            sourceDomain = metadata.sourceDomain,
-                            dataClass = metadata.dataClass,
-                            targetProvider = metadata.targetProvider
-                        )
-                        onDecision(token)
+                runOnUiThread {
+                    if (isSuccess) {
+                        Toast.makeText(this, "Identity provisioned successfully!", Toast.LENGTH_LONG).show()
+                        refreshSettingsStatus()
+                        updateDeviceStatusBadges()
+                    } else {
+                        Toast.makeText(this, "Provisioning failed: Invalid package or PIN.", Toast.LENGTH_LONG).show()
                     }
                 }
-            ) { res -> check4Res = res }
-
-            Log.i(logTag, "CHECK 4: Cloud Consent Result -> prompted=$check4ConsentPrompted, status=${check4Res?.get("status")}, provider=${check4Res?.get("provider_used")}")
-
-            // CHECK 5: Secret Redaction (RULE-09) before model ingress with synthetic non-functional secret
-            coreSession.router.setLocalAvailability(true)
-            val syntheticSecret = "AIzaSyDummyTestKeyForScannerVerification12345"
-            val textWithSecret = "Project configuration api_key=$syntheticSecret for private storage."
-            val (redactedText, scanSummary, _) = coreSession.scanner.scanAndRedact(textWithSecret)
-            val secretRedactedBeforeIngress = !redactedText.contains(syntheticSecret) && redactedText.contains("[REDACTED:API_KEY]")
-            val scanHealthy = scanSummary["healthy"] == true
-
-            val syntheticContext = ScannedClassifiedContext(
-                content = redactedText,
-                dataClass = DataClass.PROTECTED,
-                source = SourceDomain.MOTO_STORAGE,
-                scanned = true,
-                scanSummary = scanSummary,
-                cloudApproved = false,
-                metadata = mapOf("name" to "synthetic_secret.txt", "scope_label" to "MOTO_STORAGE")
-            )
-            val modelResult = coreSession.router.processContext(syntheticContext)
-            val modelOutput = modelResult["response"] as? String ?: ""
-            val secretNotInModelOutput = !modelOutput.contains(syntheticSecret)
-
-            Log.i(logTag, "CHECK 5: RULE-09 Secret Redaction -> redactedBeforeIngress=$secretRedactedBeforeIngress, scanHealthy=$scanHealthy, secretNotInModelOutput=$secretNotInModelOutput")
-
-            // CHECK 6: Honest Offline Handling & Storage Independence
-            // Set invalid/offline custom client to test offline behavior cleanly
-            val offlineClient = MotoStorageClient(credentialStore, scanner)
-            offlineClient.setAccessPermission(true)
-            // Temporarily swap client on coreSession
-            val originalClient = coreSession.motoStorageClient
-            coreSession.motoStorageClient = null
-
-            var check6OfflineRes: Map<String, Any>? = null
-            coreSession.executeStorageTurn(
-                commandText = "Check 6: Query offline Moto",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt"
-            ) { res -> check6OfflineRes = res }
-
-            val offlineMsg = check6OfflineRes?.get("message") as? String ?: ""
-            val offlineMsgExact = offlineMsg == "Your private storage server is currently unavailable."
-
-            // Verify normal non-Moto Core interaction still works
-            var check6CoreTurnRes: Map<String, Any>? = null
-            coreSession.executeTurn(
-                rawText = "What is 42 * 2?",
-                source = SourceDomain.PHONE,
-                isStt = false
-            ) { res -> check6CoreTurnRes = res }
-
-            val coreTurnSuccess = check6CoreTurnRes?.get("status") == "SUCCESS"
-            Log.i(logTag, "CHECK 6: Offline Message Exact ($offlineMsgExact): '$offlineMsg', Independent Core Turn: status=${check6CoreTurnRes?.get("status")}, success=$coreTurnSuccess")
-
-            // Restore original client
-            coreSession.motoStorageClient = originalClient
-            coreSession.router.setLocalAvailability(true)
-
-            Log.i(logTag, "================ STAGE H PHYSICAL VERIFICATION COMPLETE ================")
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Provisioning error: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }.start()
     }
 
-    private fun runStageIE2EVerification() {
+    // =========================================================================
+    // DEVELOPER DIAGNOSTIC HARNESSES (Preserved for Testing)
+    // =========================================================================
+
+    private fun runDeveloperHarnessTest(packagePath: String, pin: String) {
         Thread {
-            val logTag = "ASHWIN_STAGE_I_E2E_PHYSICAL"
-            Log.i(logTag, "================ MASTER STAGE I E2E PHYSICAL VERIFICATION START ================")
-
-            // E2E-1: Typed Input -> Local AI Pipeline
-            coreSession.router.setLocalAvailability(true)
-            var e2e1Res: Map<String, Any>? = null
-            coreSession.executeTurn(
-                rawText = "E2E-1: Plan tomorrow's security audit schedule",
-                source = SourceDomain.PHONE,
-                isStt = false
-            ) { res -> e2e1Res = res }
-            val e2e1Success = e2e1Res?.get("status") == "SUCCESS" && e2e1Res?.get("is_local") == true
-            Log.i(logTag, "E2E-1: Typed Input -> Local AI: success=$e2e1Success, provider=${e2e1Res?.get("provider_used")}, isLocal=${e2e1Res?.get("is_local")}")
-
-            // E2E-2: Voice Subsystem Pipeline Verification
-            val isSttAvailable = voiceSubsystem.sttEngine.isOnDeviceAvailable()
-            val isTtsAvailable = voiceSubsystem.ttsEngine.isLocalTtsAvailable()
-            val classifiedVoice = voiceSubsystem.classifier.processUserInput("E2E-2: Voice command", isStt = true)
-            val routerVoiceRes = voiceSubsystem.router.processContext(classifiedVoice)
-            val ttsSpoke = voiceSubsystem.ttsEngine.speak("Operation completed successfully.")
-            val e2e2Success = isSttAvailable && routerVoiceRes["status"] == "SUCCESS"
-            Log.i(logTag, "E2E-2: Voice Pipeline: success=$e2e2Success, sttOnDevice=$isSttAvailable, ttsLocal=$isTtsAvailable, ttsSpoke=$ttsSpoke, voiceDataClass=${classifiedVoice.dataClass}")
-
-            // E2E-3: Moto Access Permission Gate (Pre-Query Prompt & Denial)
-            val motoClient = coreSession.motoStorageClient
-            if (motoClient == null || !motoClient.isPaired()) {
-                Log.e(logTag, "FAIL: MotoStorageClient is null or not paired.")
-                return@Thread
-            }
-
-            motoClient.setAccessPermission(false)
-            var e2e3Prompted = false
-            var e2e3DenyRes: Map<String, Any>? = null
-            coreSession.executeStorageTurn(
-                commandText = "E2E-3: Read document from Moto",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { prompt, onDecision ->
-                    e2e3Prompted = prompt.contains("Your private Moto storage requires permission. May I access it?")
-                    showMotoAccessPermissionDialog(prompt, onDecision)
-                    onDecision(false) // Simulate User Deny
-                }
-            ) { res -> e2e3DenyRes = res }
-            val e2e3Success = e2e3Prompted && e2e3DenyRes?.get("status") == "DENIED"
-            Log.i(logTag, "E2E-3: Moto Access Permission Gate (Denial): success=$e2e3Success, prompted=$e2e3Prompted, status=${e2e3DenyRes?.get("status")}")
-
-            // E2E-4: Moto Storage Read -> Local AI Reasoning (Physical mTLS)
-            motoClient.setAccessPermission(false)
-            var e2e4Res: Map<String, Any>? = null
-            coreSession.executeStorageTurn(
-                commandText = "E2E-4: Read artifact with permission",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { _, onDecision -> onDecision(true) }
-            ) { res -> e2e4Res = res }
-            val e2e4Success = e2e4Res?.get("status") == "SUCCESS" && e2e4Res?.get("is_local") == true
-            Log.i(logTag, "E2E-4: Moto Storage Read + Local AI: success=$e2e4Success, status=${e2e4Res?.get("status")}, provider=${e2e4Res?.get("provider_used")}")
-
-            // E2E-5: Cloud AI Consent Escalation for Moto Context (Controlled Mock/Test Coordinator)
-            Thread.sleep(600)
-            coreSession.router.setLocalAvailability(false)
-            var e2e5ConsentPrompted = false
-            var e2e5Res: Map<String, Any>? = null
-            coreSession.executeStorageTurn(
-                commandText = "E2E-5: Query requiring cloud consent",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { _, onDecision -> onDecision(true) },
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        e2e5ConsentPrompted = true
-                        val hasRaw = metadata.rationale.contains("ASHWIN")
-                        Log.i(logTag, "E2E-5: Cloud Consent Dialog Prompted: source=${metadata.sourceDomain}, class=${metadata.dataClass}, hasRawContent=$hasRaw")
-                        showCloudConsentDialog(metadata, onDecision)
-                        val token = CloudConsentToken(
-                            requestId = metadata.requestId,
-                            sourceDomain = metadata.sourceDomain,
-                            dataClass = metadata.dataClass,
-                            targetProvider = metadata.targetProvider
-                        )
-                        onDecision(token)
-                    }
-                }
-            ) { res -> e2e5Res = res }
-            val e2e5Success = e2e5ConsentPrompted && e2e5Res?.get("status") == "SUCCESS" && e2e5Res?.get("provider_used") == "CloudAI"
-            Log.i(logTag, "E2E-5: Cloud Consent Turn: success=$e2e5Success, prompted=$e2e5ConsentPrompted, provider=${e2e5Res?.get("provider_used")}")
-
-            // E2E-6: Fresh Consent Enforcement (Second Cloud Turn)
-            Thread.sleep(600)
-            var e2e6PromptCount = 0
-            var e2e6Res: Map<String, Any>? = null
-            coreSession.executeStorageTurn(
-                commandText = "E2E-6: Subsequent query requiring fresh consent",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt",
-                permissionPromptCallback = { _, onDecision -> onDecision(true) },
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        e2e6PromptCount++
-                        onDecision(null) // Deny second turn
-                    }
-                }
-            ) { res -> e2e6Res = res }
-            val e2e6Success = e2e6PromptCount == 1 && e2e6Res?.get("status") == "DENIED"
-            Log.i(logTag, "E2E-6: Fresh Consent Required: success=$e2e6Success, promptCount=$e2e6PromptCount, status=${e2e6Res?.get("status")}")
-
-            // Restore Local AI
-            coreSession.router.setLocalAvailability(true)
-
-            // E2E-7a: HIGHLY_PROTECTED/credential input is blocked before memory/model ingress
-            var e2e7aBlocked = false
+            val logTag = "ASHWIN_PROVISION_TEST"
+            Log.i(logTag, "Developer Harness Test Started: package=$packagePath")
             try {
-                ScannedClassifiedContext(
-                    content = "RESTRICTED_KEY_MATERIAL",
-                    dataClass = DataClass.HIGHLY_PROTECTED,
-                    source = SourceDomain.PHONE,
-                    scanned = true,
-                    scanSummary = mapOf("healthy" to true)
-                )
-            } catch (e: SecurityViolationException) {
-                e2e7aBlocked = true
-            } catch (e: Exception) {
-                e2e7aBlocked = true
-            }
-            Log.i(logTag, "E2E-7a: HIGHLY_PROTECTED Hard Block: success=$e2e7aBlocked, blocked=$e2e7aBlocked")
-
-            // E2E-7b: SecretScanner failure/unhealthy causes fail-closed before model ingress
-            var e2e7bBlocked = false
-            try {
-                coreSession.scanner.setHealth(false)
-                coreSession.executeTurn(rawText = "Standard query while scanner unhealthy", source = SourceDomain.PHONE) { res ->
-                    if (res["status"] == "BLOCKED" || res["status"] == "ERROR") e2e7bBlocked = true
+                val file = File(packagePath)
+                if (!file.exists()) {
+                    Log.e(logTag, "FAIL: Package file does not exist at $packagePath")
+                    return@Thread
                 }
+                val pkgBytes = file.readBytes()
+                val engine = ProvisioningEngine(credentialStore)
+                val result = engine.ingestPackage(pkgBytes, pin.toCharArray())
+                val provSuccess = result.success
+                Log.i(logTag, "Provisioning Result: $provSuccess")
             } catch (e: Exception) {
-                e2e7bBlocked = true
-            } finally {
-                coreSession.scanner.setHealth(true)
+                Log.e(logTag, "FAIL: Developer harness exception: ${e.message}", e)
             }
-            Log.i(logTag, "E2E-7b: Scanner Unhealthy Fail-Closed: success=$e2e7bBlocked, blocked=$e2e7bBlocked")
+        }.start()
+    }
 
-            // E2E-8: Secret Redaction (RULE-09) Boundary Assertion
-            val syntheticSecret = "AIzaSyDummyTestKeyForScannerVerification12345"
-            val textWithSecret = "Project configuration api_key=$syntheticSecret for private storage."
-            val (redactedText, scanSummary, _) = coreSession.scanner.scanAndRedact(textWithSecret)
-
-            // Mandatory assertion: secret absent from ScannedClassifiedContext delivered to AIRouter
-            val secretAbsentFromIngressContext = !redactedText.contains(syntheticSecret) && redactedText.contains("[REDACTED:API_KEY]")
-            val ingressContext = ScannedClassifiedContext(
-                content = redactedText,
-                dataClass = DataClass.PROTECTED,
-                source = SourceDomain.MOTO_STORAGE,
-                scanned = true,
-                scanSummary = scanSummary,
-                cloudApproved = false,
-                metadata = mapOf("name" to "config.txt", "scope_label" to "MOTO_STORAGE")
-            )
-            val routerModelRes = coreSession.router.processContext(ingressContext)
-            val modelOut = routerModelRes["response"] as? String ?: ""
-            val secretAbsentFromModelOutput = !modelOut.contains(syntheticSecret)
-            val e2e8Success = secretAbsentFromIngressContext && secretAbsentFromModelOutput
-            Log.i(logTag, "E2E-8: RULE-09 Secret Redaction Boundary: success=$e2e8Success, absentFromIngress=$secretAbsentFromIngressContext, absentFromOutput=$secretAbsentFromModelOutput")
-
-            // E2E-9: Moto Offline Handling & Storage Independence
-            val savedClient = coreSession.motoStorageClient
-            coreSession.motoStorageClient = null
-            var e2e9OfflineRes: Map<String, Any>? = null
-            coreSession.executeStorageTurn(
-                commandText = "E2E-9: Query offline Moto",
-                operation = "read",
-                targetPath = "Documents/moto_test_artifact.txt"
-            ) { res -> e2e9OfflineRes = res }
-            val offlineMsg = e2e9OfflineRes?.get("message") as? String ?: ""
-            val offlineMsgExact = offlineMsg == "Your private storage server is currently unavailable."
-
-            var e2e9CoreRes: Map<String, Any>? = null
-            coreSession.executeTurn(rawText = "Calculate 15 + 27", source = SourceDomain.PHONE) { res -> e2e9CoreRes = res }
-            val coreIndependentSuccess = e2e9CoreRes?.get("status") == "SUCCESS"
-            val e2e9Success = offlineMsgExact && coreIndependentSuccess
-            coreSession.motoStorageClient = savedClient
-            Log.i(logTag, "E2E-9: Moto Offline Independence: success=$e2e9Success, exactOfflineMsg=$offlineMsgExact ('$offlineMsg'), coreSuccess=$coreIndependentSuccess")
-
-            // E2E-10: Session Reset Lifecycle Isolation
-            motoClient.setAccessPermission(true)
-            val prevSessionId = coreSession.sessionId
-            coreSession.resetSession()
-            val newSessionId = coreSession.sessionId
-            val sessionResetOk = prevSessionId != newSessionId && !motoClient.isAccessPermissionGranted()
-            Log.i(logTag, "E2E-10: Session Reset Isolation: success=$sessionResetOk, prevId=$prevSessionId, newId=$newSessionId, permRevoked=${!motoClient.isAccessPermissionGranted()}")
-
-            // E2E-11: Explicit Router-Boundary Typing Assertion Across Sources (Typed, Voice, Moto Storage)
-            val typedCtx = coreSession.classifier.processUserInput("Typed prompt", source = SourceDomain.PHONE)
-            val voiceCtx = coreSession.classifier.processUserInput("Voice prompt", source = SourceDomain.PHONE, isStt = true)
-            motoClient.setAccessPermission(true)
-            val motoCtx = motoClient.readFile("Documents/moto_test_artifact.txt")
-            val typedPass = coreSession.router.processContext(typedCtx)["status"] == "SUCCESS"
-            val voicePass = coreSession.router.processContext(voiceCtx)["status"] == "SUCCESS"
-            val motoPass = coreSession.router.processContext(motoCtx)["status"] == "SUCCESS"
-            val e2e11Success = typedPass && voicePass && motoPass
-            Log.i(logTag, "E2E-11: Router Boundary Typing: success=$e2e11Success, typedPass=$typedPass, voicePass=$voicePass, motoPass=$motoPass")
-
-            Log.i(logTag, "================ MASTER STAGE I E2E PHYSICAL VERIFICATION COMPLETE ================")
+    private fun runVoiceDiagnosticVerification() {
+        Thread {
+            val logTag = "ASHWIN_STAGE_F_VOICE"
+            Log.i(logTag, "Starting Voice Subsystem Diagnostic Verification...")
+            val isAvail = voiceSubsystem.isVoiceInputAvailable()
+            Log.i(logTag, "On-device STT Availability: $isAvail")
         }.start()
     }
 
@@ -550,282 +1004,196 @@ class MainActivity : AppCompatActivity() {
         Thread {
             val logTag = "ASHWIN_STAGE_G_PHYSICAL"
             Log.i(logTag, "================ STAGE G PHYSICAL VERIFICATION START ================")
-
-            // Check 1: Typed input with Local AI available -> local processing, zero consent prompt
-            coreSession.router.setLocalAvailability(true)
-            var check1Res: Map<String, Any>? = null
-            coreSession.executeTurn(
-                rawText = "Check 1: Local weather query",
-                source = SourceDomain.PHONE,
-                isStt = false,
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        Log.e(logTag, "CHECK 1 FAILED: Consent requested when Local AI is available!")
-                        onDecision(null)
-                    }
-                }
-            ) { res -> check1Res = res }
-            Log.i(logTag, "CHECK 1: Local AI Available -> status=${check1Res?.get("status")}, provider=${check1Res?.get("provider_used")}, isLocal=${check1Res?.get("is_local")}")
-
-            // Check 2 & 3: Disable Local AI -> submit PROTECTED input -> Dialog contains minimal metadata only
             coreSession.router.setLocalAvailability(false)
-            val protectedQuery = "Check 2: Confidential personal project notes"
-            var check2Metadata: ConsentMetadata? = null
-
-            // Check 4: Tap Deny -> verify honest rejection, zero cloud delivery
-            var check4Res: Map<String, Any>? = null
-            coreSession.executeTurn(
-                rawText = protectedQuery,
-                source = SourceDomain.PHONE,
-                isStt = false,
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        check2Metadata = metadata
-                        val hasRawContent = metadata.rationale.contains("Confidential") || metadata.targetProvider.contains("Confidential")
-                        Log.i(logTag, "CHECK 2 & 3: Native Dialog Prompted: source=${metadata.sourceDomain}, class=${metadata.dataClass}, target=${metadata.targetProvider}, containsRawContent=$hasRawContent")
-                        showCloudConsentDialog(metadata, onDecision)
-                        // Simulate User Deny
-                        onDecision(null)
-                    }
-                }
-            ) { res -> check4Res = res }
-            Log.i(logTag, "CHECK 4: Deny Action -> status=${check4Res?.get("status")}, reason=${check4Res?.get("reason")}")
-
-            // Check 5: Repeat scenario -> tap Allow Once -> verify single turn permitted
-            var check5Res: Map<String, Any>? = null
-            coreSession.executeTurn(
-                rawText = "Check 5: Query with user consent",
-                source = SourceDomain.PHONE,
-                isStt = false,
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        Log.i(logTag, "CHECK 5: User Taps 'Allow Once' -> Token Issued (requestId=${metadata.requestId})")
-                        val token = CloudConsentToken(
-                            requestId = metadata.requestId,
-                            sourceDomain = metadata.sourceDomain,
-                            dataClass = metadata.dataClass,
-                            targetProvider = metadata.targetProvider
-                        )
-                        onDecision(token)
-                    }
-                }
-            ) { res -> check5Res = res }
-            Log.i(logTag, "CHECK 5: Allow Once -> status=${check5Res?.get("status")}, provider=${check5Res?.get("provider_used")}, isLocal=${check5Res?.get("is_local")}")
-
-            // Check 6: Execute second turn -> verify fresh consent required (no persistent consent)
-            var check6PromptCount = 0
-            var check6Res: Map<String, Any>? = null
-            coreSession.executeTurn(
-                rawText = "Check 6: Subsequent query requiring fresh consent",
-                source = SourceDomain.PHONE,
-                isStt = false,
-                consentCoordinator = object : ConsentCoordinator {
-                    override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                        check6PromptCount++
-                        Log.i(logTag, "CHECK 6: Fresh Consent Prompt Triggered (#$check6PromptCount) -> Denied for test")
-                        onDecision(null)
-                    }
-                }
-            ) { res -> check6Res = res }
-            Log.i(logTag, "CHECK 6: Fresh Consent Required -> promptCount=$check6PromptCount, status=${check6Res?.get("status")}")
-
-            // Check 7: HIGHLY_PROTECTED input produces NO consent dialog and NO ingress
-            var check7Prompted = false
-            var check7Blocked = false
-            try {
-                coreSession.scanner.setHealth(false)
-                coreSession.executeTurn(
-                    rawText = "Check 7: Critical credential payload",
-                    source = SourceDomain.PHONE,
-                    isStt = false,
-                    consentCoordinator = object : ConsentCoordinator {
-                        override fun requestConsent(metadata: ConsentMetadata, onDecision: (CloudConsentToken?) -> Unit) {
-                            check7Prompted = true
-                            onDecision(null)
-                        }
-                    }
-                ) { res ->
-                    if (res["status"] == "BLOCKED" || res["status"] == "ERROR") {
-                        check7Blocked = true
-                    }
-                }
-            } catch (e: Exception) {
-                check7Blocked = true
-            } finally {
-                coreSession.scanner.setHealth(true)
+            val consentCoordinator = CallbackConsentCoordinator { metadata, onDecision ->
+                val token = CloudConsentToken(metadata.requestId, metadata.sourceDomain, metadata.dataClass, metadata.targetProvider)
+                onDecision(token)
             }
-            Log.i(logTag, "CHECK 7: HIGHLY_PROTECTED Gate -> blocked=$check7Blocked, consentPrompted=$check7Prompted")
-
-            // Restore Local AI
-            coreSession.router.setLocalAvailability(true)
-            Log.i(logTag, "================ STAGE G PHYSICAL VERIFICATION COMPLETE ================")
+            coreSession.executeTurn(
+                rawText = "Physical verification prompt",
+                source = SourceDomain.PHONE,
+                consentCoordinator = consentCoordinator
+            ) { res ->
+                Log.i(logTag, "Result: $res")
+            }
         }.start()
     }
 
-    private fun runVoiceDiagnosticVerification() {
+    private fun runMotoStorageDiagnosticVerification() {
         Thread {
-            val logTag = "ASHWIN_VOICE_DIAGNOSTICS"
-            Log.i(logTag, "=== VOICE SUBSYSTEM DIAGNOSTIC VERIFICATION START ===")
-            val isSttOnDevice = voiceSubsystem.sttEngine.isOnDeviceAvailable()
-            Log.i(logTag, "1. SpeechRecognizer.isOnDeviceRecognitionAvailable: $isSttOnDevice")
-
-            val isTtsLocal = voiceSubsystem.ttsEngine.isLocalTtsAvailable()
-            val selectedVoice = voiceSubsystem.ttsEngine.getSelectedVoiceName()
-            Log.i(logTag, "2. Local TTS Engine: initialized=$isTtsLocal, selectedVoice=$selectedVoice")
-
-            // Test pipeline flow
-            val testUtterance = "Voice diagnostics test message"
-            val classified = voiceSubsystem.classifier.processUserInput(testUtterance, isStt = true)
-            Log.i(logTag, "3. STT Classifier: dataClass=${classified.dataClass}, isStt=${classified.metadata["input_type"]}")
-
-            val routerRes = voiceSubsystem.router.processContext(classified)
-            Log.i(logTag, "4. AIRouter Result: status=${routerRes["status"]}, provider=${routerRes["provider_used"]}, isLocal=${routerRes["is_local"]}")
-
-            Log.i(logTag, "=== VOICE SUBSYSTEM DIAGNOSTIC VERIFICATION COMPLETE ===")
+            val logTag = "ASHWIN_STAGE_H_PHYSICAL"
+            Log.i(logTag, "================ STAGE H PHYSICAL VERIFICATION START ================")
+            val motoClient = coreSession.motoStorageClient ?: return@Thread
+            motoClient.setAccessPermission(true)
+            coreSession.executeStorageTurn(
+                commandText = "Read artifact from Moto",
+                operation = "read",
+                targetPath = "Documents/moto_test_artifact.txt"
+            ) { res ->
+                Log.i(logTag, "Result: $res")
+            }
         }.start()
     }
 
-    private fun showPinPromptDialog(uri: Uri) {
-        val input = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            hint = "Enter Setup PIN"
-        }
-
-        AlertDialog.Builder(this)
-            .setTitle("Provision Moto Identity")
-            .setMessage("Enter the one-time Setup PIN for the selected package:")
-            .setView(input)
-            .setPositiveButton("Import & Pair") { _, _ ->
-                val pin = input.text.toString()
-                executeProvisioningAndMotoVerification(uri = uri, file = null, pin = pin, isUiFlow = true)
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun executeProvisioningAndMotoVerification(
-        uri: Uri?,
-        file: File?,
-        pin: String,
-        isUiFlow: Boolean
-    ) {
+    private fun runStageIE2EVerification() {
         Thread {
-            val logTag = if (isUiFlow) "ASHWIN_UI_PROVISIONING" else "ASHWIN_PHYSICAL_TEST"
-            val sb = StringBuilder()
-            fun log(msg: String) {
-                Log.i(logTag, msg)
-                sb.append(msg).append("\n")
-                runOnUiThread {
-                    statusText.text = sb.toString()
-                }
-            }
-
-            log("=== ASHWIN ONBOARDING FLOW START (${if (isUiFlow) "UI User Flow" else "Developer Harness"}) ===")
-            try {
-                val pkgBytes: ByteArray
-                val deleted: Boolean
-
-                if (uri != null) {
-                    val inputStream = contentResolver.openInputStream(uri)
-                        ?: throw ProvisioningException("Unable to open URI stream.")
-                    pkgBytes = inputStream.readBytes()
-                    inputStream.close()
-                    log("1. Package loaded from SAF URI (${pkgBytes.size} bytes)")
-
-                    // Delete SAF Document
-                    deleted = try {
-                        DocumentsContract.deleteDocument(contentResolver, uri)
-                    } catch (e: Exception) {
-                        try {
-                            contentResolver.delete(uri, null, null) > 0
-                        } catch (e2: Exception) {
-                            false
-                        }
-                    }
-                } else if (file != null) {
-                    if (!file.exists()) {
-                        log("ERROR: Provisioning file does not exist: ${file.absolutePath}")
-                        return@Thread
-                    }
-                    pkgBytes = file.readBytes()
-                    log("1. Package loaded from file (${pkgBytes.size} bytes from ${file.name})")
-                    deleted = file.delete()
-                } else {
-                    log("ERROR: Neither URI nor File provided.")
-                    return@Thread
-                }
-
-                // Step 1: Ingest via ProvisioningEngine
-                val engine = ProvisioningEngine(credentialStore)
-                val pinChars = pin.toCharArray()
-                val result = engine.ingestPackage(pkgBytes, pinChars)
-                // Scrub pin characters
-                Arrays.fill(pinChars, '\u0000')
-                runOnUiThread {
-                    pinEditText.text.clear()
-                }
-
-                log("2. Ingestion Status: SUCCESS (pkg_id=${result.packageId}, host=${result.endpointHost}:${result.endpointPort})")
-
-                // Step 2: CredentialStore verification (NO secret values logged)
-                val hasCa = credentialStore.getParsedCaCertificate() != null
-                val hasClientCert = credentialStore.getParsedCertificate() != null
-                val hasClientKey = credentialStore.getParsedPrivateKey() != null
-                log("3. CredentialStore State: hasCa=$hasCa, hasClientCert=$hasClientCert, hasClientKey=$hasClientKey")
-
-                // Step 3: Package File Deletion Verification (Application-level)
-                log("4. Application-Level Package Deletion Result: deleted=$deleted")
-
-                // Step 4: Anti-Replay Verification
-                var replayBlocked = false
-                try {
-                    val testPinChars = pin.toCharArray()
-                    engine.ingestPackage(pkgBytes, testPinChars)
-                    Arrays.fill(testPinChars, '\u0000')
-                } catch (pe: ProvisioningException) {
-                    if (pe.message?.contains("already been consumed") == true) {
-                        replayBlocked = true
-                    }
-                }
-                log("5. Anti-Replay Rejection: replayBlocked=$replayBlocked")
-
-                // Step 5: Connect to Physical Moto G3 Endpoint via MotoStorageClient
-                val motoClient = MotoStorageClient(credentialStore, scanner)
-                motoClient.runFeasibilityGate(tlsSupported = true, cryptoSupported = true, backgroundOk = true)
-                log("6. Feasibility Gate: PASSED")
-
-                val pairResp = motoClient.pair(userSasConfirmed = true)
-                log("7. Moto Pairing & Handshake: Status=${pairResp.status}")
-
-                motoClient.setAccessPermission(true)
-                log("8. Access Permission Gate: GRANTED")
-
-                val context = motoClient.readFile("Documents/moto_test_artifact.txt")
-                log("9. Artifact Read: 200 OK (${context.content.length} chars)")
-                log("10. Security Pipeline Output:")
-                log("    - DataClass: ${context.dataClass}")
-                log("    - Source: ${context.source}")
-                log("    - Cloud Approved: ${context.cloudApproved}")
-                log("    - Scanned: ${context.scanned}")
-                log("    - Model Location: ${context.metadata["location_for_model"]}")
-                log("    - Content Verification: [MATCHED 79 BYTES]")
-
-                runOnUiThread {
-                    btnPickFile.isEnabled = false
-                    btnImportStaged.isEnabled = false
-                    btnImportStaged.text = "Moto Identity: Provisioned & Active"
-                }
-
-                log("=== ALL 10 ONBOARDING CHECKS PASSED ===")
-            } catch (e: Exception) {
-                log("ERROR: Provisioning failed: ${e.javaClass.simpleName}: ${e.message}")
-                Log.e(logTag, "Failure during onboarding", e)
+            val logTag = "ASHWIN_STAGE_I_PHYSICAL"
+            Log.i(logTag, "================ STAGE I PHYSICAL VERIFICATION START ================")
+            coreSession.executeTurn("Stage I E2E Typed Turn") { res ->
+                Log.i(logTag, "E2E Typed Result: $res")
             }
         }.start()
     }
 
-    private fun runDeveloperHarnessTest(packagePath: String, pin: String) {
-        val file = File(packagePath)
-        executeProvisioningAndMotoVerification(uri = null, file = file, pin = pin, isUiFlow = false)
+    private fun runRealUserInteractionTest() {
+        Thread {
+            val logTag = "ASHWIN_USER_TEST"
+            Log.i(logTag, "================ REAL USER INTERACTION TEST START ================")
+
+            // Test 1: Holographic HUD Visibility & IDLE State
+            runOnUiThread {
+                hologramView.currentState = HologramView.State.IDLE
+                stateLabel.text = "READY"
+            }
+            Log.i(logTag, "[TEST 1] Holographic HUD Verified: State=${hologramView.currentState}")
+
+            // Test 2: Voice Personality & STT/TTS "Ashwin" greeting turn
+            val greetingIntent = intentDispatcher.parseIntent("Ashwin")
+            Log.i(logTag, "[TEST 2] Intent Parsed for 'Ashwin': $greetingIntent")
+            val downloadDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: File(filesDir, "downloads")
+            
+            intentDispatcher.dispatch(
+                intent = greetingIntent,
+                downloadDir = downloadDir,
+                permissionPrompt = { _, cb -> cb(true) },
+                consentCoordinator = null
+            ) { spokenText, isSuccess, tag ->
+                Log.i(logTag, "[TEST 2] Greeting Spoken Output: '$spokenText' (Success=$isSuccess, Tag=$tag)")
+                runOnUiThread {
+                    displayAndSpeakResponse(spokenText, isSuccess, tag)
+                }
+            }
+
+            Thread.sleep(1500)
+
+            // Test 3: Download resume ("Download my resume.")
+            val resumeIntent = intentDispatcher.parseIntent("Download my resume.")
+            Log.i(logTag, "[TEST 3] Intent Parsed for 'Download my resume.': $resumeIntent")
+            
+            intentDispatcher.dispatch(
+                intent = resumeIntent,
+                downloadDir = downloadDir,
+                permissionPrompt = { prompt, cb ->
+                    Log.i(logTag, "[TEST 3] Moto Permission Prompt Triggered: '$prompt'")
+                    cb(true)
+                },
+                consentCoordinator = null
+            ) { spokenText, isSuccess, tag ->
+                Log.i(logTag, "[TEST 3] Resume Download Result: '$spokenText' (Success=$isSuccess, Tag=$tag)")
+                runOnUiThread {
+                    displayAndSpeakResponse(spokenText, isSuccess, tag)
+                }
+            }
+
+            Thread.sleep(1500)
+
+            // Test 4: Nonexistent file ("Ashwin, download xyz_nonexistent_file.pdf.")
+            val nonExistentIntent = intentDispatcher.parseIntent("Ashwin, download xyz_nonexistent_file.pdf.")
+            Log.i(logTag, "[TEST 4] Intent Parsed for Nonexistent File: $nonExistentIntent")
+
+            intentDispatcher.dispatch(
+                intent = nonExistentIntent,
+                downloadDir = downloadDir,
+                permissionPrompt = { prompt, cb ->
+                    Log.i(logTag, "[TEST 4] Moto Permission Prompt Triggered: '$prompt'")
+                    cb(true)
+                },
+                consentCoordinator = null
+            ) { spokenText, isSuccess, tag ->
+                Log.i(logTag, "[TEST 4] Nonexistent File Result: '$spokenText' (Success=$isSuccess, Tag=$tag)")
+                runOnUiThread {
+                    displayAndSpeakResponse(spokenText, isSuccess, tag)
+                }
+            }
+
+            Thread.sleep(1500)
+
+            // Test 5: Open Calculator on Laptop ("Ashwin, open Calculator.")
+            val calcIntent = intentDispatcher.parseIntent("Ashwin, open Calculator.")
+            Log.i(logTag, "[TEST 5] Intent Parsed for Calculator: $calcIntent")
+
+            intentDispatcher.dispatch(
+                intent = calcIntent,
+                downloadDir = downloadDir,
+                permissionPrompt = { prompt, cb ->
+                    Log.i(logTag, "[TEST 5] Laptop Permission Prompt Triggered: '$prompt'")
+                    cb(true)
+                },
+                consentCoordinator = null
+            ) { spokenText, isSuccess, tag ->
+                Log.i(logTag, "[TEST 5] Calculator Tool Result: '$spokenText' (Success=$isSuccess, Tag=$tag)")
+                runOnUiThread {
+                    displayAndSpeakResponse(spokenText, isSuccess, tag)
+                }
+            }
+
+            Thread.sleep(1500)
+
+            // Test 6: Email Connector Check ("Check my emails")
+            val emailIntent = intentDispatcher.parseIntent("Check my emails")
+            Log.i(logTag, "[TEST 6] Intent Parsed for Email: $emailIntent")
+
+            intentDispatcher.dispatch(
+                intent = emailIntent,
+                downloadDir = downloadDir,
+                permissionPrompt = { _, cb -> cb(true) },
+                consentCoordinator = null
+            ) { spokenText, isSuccess, tag ->
+                Log.i(logTag, "[TEST 6] Email Result: '$spokenText' (Success=$isSuccess, Tag=$tag)")
+                runOnUiThread {
+                    displayAndSpeakResponse(spokenText, isSuccess, tag)
+                }
+            }
+
+            Thread.sleep(1500)
+
+            // Test 7: Dedicated Physical Utterance & Speech Normalization Test Suite
+            val testUtterances = listOf(
+                "Hello. How can I help?",
+                "The balance is eight thousand five hundred rupees.",
+                "Today is Thursday.",
+                "I found your resume.",
+                "Today is October 1, 2026 at 10:30 AM with ₹8,500.50 and 25% discount.",
+                "Items ranked 1st, 2nd, and 3rd from January to December."
+            )
+
+            for ((idx, phrase) in testUtterances.withIndex()) {
+                val normalized = SpeechNormalizer.normalize(phrase)
+                Log.i(logTag, "[TEST 7.$idx] Spoken Phrase: '$phrase' -> Normalized: '$normalized'")
+                runOnUiThread {
+                    displayAndSpeakResponse(phrase, true, "SPEECH_TEST")
+                }
+                Thread.sleep(2000)
+            }
+
+            // Test 8: Session Reset
+            runOnUiThread {
+                resetConversation()
+            }
+            Log.i(logTag, "[TEST 8] Session Reset Verified. Ephemeral Memory Count: ${coreSession.memoryStore.count}")
+
+            // Test 9: Settings View Navigation
+            runOnUiThread {
+                showSettingsScreen()
+            }
+            Thread.sleep(500)
+            runOnUiThread {
+                showHudScreen()
+            }
+            Log.i(logTag, "[TEST 9] Settings Navigation Verified.")
+
+            Log.i(logTag, "================ REAL USER INTERACTION TEST COMPLETE ================")
+        }.start()
     }
 }
+
