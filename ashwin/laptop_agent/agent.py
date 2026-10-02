@@ -230,6 +230,11 @@ def _launch_native_win32_process(exe_path: str, cmd_line_str: Optional[str] = No
 def dpapi_encrypt_bytes(data: bytes, description: str = "ASHWIN_LAPTOP_SECRET") -> bytes:
     """Encrypts bytes using Windows DPAPI (CryptProtectData). Never stores plaintext on disk."""
     if sys.platform != "win32":
+        if os.environ.get("ASHWIN_ALLOW_INSECURE_TEST_DPAPI") != "1":
+            raise AgentSecurityError(
+                "DPAPI encryption requires Windows OS. Insecure plaintext simulation is refused on non-Windows "
+                "unless ASHWIN_ALLOW_INSECURE_TEST_DPAPI=1 is explicitly set for test environments."
+            )
         return b"DPAPI_SIMULATED:" + data
 
     blob_in = DATA_BLOB(
@@ -258,6 +263,11 @@ def dpapi_encrypt_bytes(data: bytes, description: str = "ASHWIN_LAPTOP_SECRET") 
 def dpapi_decrypt_bytes(encrypted_data: bytes) -> bytes:
     """Decrypts DPAPI-encrypted bytes using Windows DPAPI (CryptUnprotectData)."""
     if sys.platform != "win32":
+        if os.environ.get("ASHWIN_ALLOW_INSECURE_TEST_DPAPI") != "1":
+            raise AgentSecurityError(
+                "DPAPI decryption requires Windows OS. Insecure plaintext simulation is refused on non-Windows "
+                "unless ASHWIN_ALLOW_INSECURE_TEST_DPAPI=1 is explicitly set for test environments."
+            )
         if encrypted_data.startswith(b"DPAPI_SIMULATED:"):
             return encrypted_data[len(b"DPAPI_SIMULATED:"):]
         raise AgentSecurityError("Invalid simulated DPAPI data.")
@@ -655,6 +665,12 @@ class WindowsLaptopAgent:
                 kernel32.CloseHandle(h)
         else:
             with open(source_path, "rb") as source_handle:
+                st = os.fstat(source_handle.fileno())
+                cur_vol = str(st.st_dev)
+                cur_file_id = str(st.st_ino)
+                if cur_vol != reg.bound_vol_serial or cur_file_id != reg.bound_file_id:
+                    raise AgentSecurityError("Single-handle verification failed: File identity mismatch.")
+
                 header = source_handle.read(512)
                 if ext == ".png" and not header.startswith(b"\x89PNG\r\n\x1a\n"):
                     raise AgentSecurityError("Magic byte mismatch for PNG.")
@@ -664,6 +680,7 @@ class WindowsLaptopAgent:
                     raise AgentSecurityError("Magic byte mismatch for PDF.")
                 if header.startswith(b"MZ") or header.startswith(b"\x7fELF"):
                     raise AgentSecurityError("Executable magic bytes detected!")
+
 
                 source_handle.seek(0)
                 temp_fd, temp_path = tempfile.mkstemp(dir=self.temp_dir, prefix="ashwin_doc_", suffix=ext)

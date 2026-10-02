@@ -1,0 +1,46 @@
+name: ASHWIN CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }} - Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ['3.12', '3.13', '3.14']
+        include:
+          - os: windows-latest
+            python-version: '3.14'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+
+      - name: Verify Security Specification SHA-256
+        shell: python
+        run: |
+          import hashlib
+          expected = "D6B4C52E7AFF5C60F8A088E94D06829CFDF67CFEDF0FBE275EDBC16507007C36"
+          actual = hashlib.sha256(open("ASHWIN_Security_Specification_v1.0.1.md", "rb").read()).hexdigest().upper()
+          assert actual == expected, f"Specification SHA mismatch! Got: {actual}, Expected: {expected}"
+          print("Security specification hash verified:", actual)
+
+      - name: Run Full Test Suite
+        run: |
+          python run_tests.py

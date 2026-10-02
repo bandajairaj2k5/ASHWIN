@@ -66,6 +66,7 @@ class TestPhase4LaptopEndpoint(unittest.TestCase):
 
     # ==================== TEST 1: DPAPI ENCRYPTED IDENTITY ====================
 
+    @unittest.skipUnless(sys.platform == "win32", "Requires native Win32 DPAPI CryptProtectData/CryptUnprotectData")
     def test_dpapi_encrypted_identity_persistence(self):
         """Verifies persistent identity is encrypted via DPAPI and no plaintext private key is written."""
         cert_data = b"-----BEGIN CERTIFICATE-----\nTEST_CERT_DATA\n-----END CERTIFICATE-----"
@@ -193,6 +194,7 @@ class TestPhase4LaptopEndpoint(unittest.TestCase):
         self.assertEqual(items[0]["type"], "file")
         self.assertIn("id", items[0])
 
+    @unittest.skipUnless(sys.platform == "win32", "Requires native Win32 process execution")
     @patch("ashwin.laptop_agent.agent._launch_native_win32_process")
     def test_tool_4_open_folder(self, mock_launch):
         """Tool 4: open_folder returns confirmation string only, zero content returned to model."""
@@ -205,6 +207,7 @@ class TestPhase4LaptopEndpoint(unittest.TestCase):
         self.assertNotIn("content", result.lower())
         mock_launch.assert_called_once()
 
+    @unittest.skipUnless(sys.platform == "win32", "Requires native Win32 process execution")
     @patch("ashwin.laptop_agent.agent._launch_native_win32_process")
     def test_tool_5_view_document(self, mock_launch):
         """Tool 5: view_document returns confirmation string only, zero document content returned."""
@@ -235,6 +238,7 @@ class TestPhase4LaptopEndpoint(unittest.TestCase):
         self.assertIn("ASHWIN Windows laptop notes", ctx.content)
         self.assertEqual(ctx.metadata["location_for_model"], "AllowedScope/notes.txt")
 
+    @unittest.skipUnless(sys.platform == "win32", "Requires native Win32 process execution")
     @patch("ashwin.laptop_agent.agent._launch_native_win32_process")
     def test_tool_7_open_allowed_app(self, mock_launch):
         """Tool 7: open_allowed_app launches allowlisted apps only with user confirmation."""
@@ -273,6 +277,7 @@ class TestPhase4LaptopEndpoint(unittest.TestCase):
             with self.assertRaises(AgentSecurityError, msg=f"Failed to reject: {bad_app}"):
                 self.agent.open_allowed_app(bad_app, user_confirmed=True)
 
+    @unittest.skipUnless(sys.platform == "win32", "Requires native Win32 process execution")
     @patch("ashwin.laptop_agent.agent._launch_native_win32_process")
     def test_tool_5_view_document_all_formats_and_zero_content(self, mock_launch):
         """Tool 5: view_document tests all approved formats and guarantees zero content leakage."""

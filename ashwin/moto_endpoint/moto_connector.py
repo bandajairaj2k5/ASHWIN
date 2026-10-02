@@ -6,7 +6,7 @@ and the full decrypt -> bounded buffering -> extraction -> secret scan -> Router
 
 import os
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from ashwin.core.models import (
     DataClass,

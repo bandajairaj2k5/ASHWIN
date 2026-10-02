@@ -22,17 +22,64 @@ class TestProvisioningPackageEngine(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # Load real test certificates
-        with open("certs/ca.crt", "r", encoding="utf-8") as f:
-            cls.ca_pem = f.read()
-        with open("certs/client.crt", "r", encoding="utf-8") as f:
-            cls.client_cert_pem = f.read()
-        with open("certs/client.key", "r", encoding="utf-8") as f:
-            cls.client_key_pem = f.read()
-        with open("certs/server.crt", "r", encoding="utf-8") as f:
-            cls.server_cert_pem = f.read()
+        # Dynamically generate ephemeral in-memory test CA, client, and server certs/keys
+        # (Zero hardcoded or committed private key files required on disk)
+        one_day = datetime.timedelta(days=1)
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        # 1. Root CA
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ASHWIN Test Root CA")])
+        ca_cert = (
+            x509.CertificateBuilder()
+            .subject_name(ca_name)
+            .issuer_name(ca_name)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - one_day)
+            .not_valid_after(now + one_day)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(ca_key, hashes.SHA256())
+        )
+        cls.ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+        # 2. Client Key & Cert
+        client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        client_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ashwin-mobile-client")])
+        client_cert = (
+            x509.CertificateBuilder()
+            .subject_name(client_name)
+            .issuer_name(ca_name)
+            .public_key(client_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - one_day)
+            .not_valid_after(now + one_day)
+            .sign(ca_key, hashes.SHA256())
+        )
+        cls.client_cert_pem = client_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        cls.client_key_pem = client_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        ).decode("utf-8")
+
+        # 3. Server Key & Cert
+        server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        server_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ashwin-moto-storage")])
+        server_cert = (
+            x509.CertificateBuilder()
+            .subject_name(server_name)
+            .issuer_name(ca_name)
+            .public_key(server_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - one_day)
+            .not_valid_after(now + one_day)
+            .sign(ca_key, hashes.SHA256())
+        )
+        cls.server_cert_pem = server_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
 
         cls.pin = "AshwinSetupPin2026!"
+
 
     def test_positive_package_creation_and_decryption(self):
         pkg_bytes = ProvisioningPackageEngine.create_package(
