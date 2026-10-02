@@ -51,23 +51,22 @@ class LaptopCryptoSecurityError(Exception):
 def generate_laptop_certificate(common_name: str = "LAPTOP-AGENT-01") -> Tuple[bytes, bytes]:
     """Generates a self-signed X.509 certificate and EC P-256 private key for laptop endpoint."""
     key = ec.generate_private_key(ec.SECP256R1())
+    pub_key = key.public_key()
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
     
-    cert = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        issuer
-    ).public_key(
-        key.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.datetime.now(datetime.timezone.utc)
-    ).not_valid_after(
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365)
-    ).add_extension(
-        x509.BasicConstraints(ca=True, path_length=None), critical=True
-    ).sign(key, hashes.SHA256())
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(pub_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(pub_key), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(pub_key), critical=False)
+        .sign(key, hashes.SHA256())
+    )
 
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
     key_pem = key.private_bytes(
